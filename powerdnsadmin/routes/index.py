@@ -279,6 +279,89 @@ def login():
                             error=('User ' + azure_username +
                                    ' is not in any authorised groups.'))
 
+        # Handle account/group creation, if enabled
+        if Setting().get('azure_group_accounts_enabled') and mygroups:
+            current_app.logger.info('Azure group account sync enabled')
+            for azure_group in mygroups:
+
+                name_value = Setting().get('azure_group_accounts_name')
+                description_value = Setting().get('azure_group_accounts_description')
+
+                select_values = name_value
+                if description_value != '':
+                    select_values += ',' + description_value
+                azure_group_info = azure.get('groups/{}?$select={}'.format(azure_group, select_values)).text
+                current_app.logger.info('Group name for {}: {}'.format(azure_group, azure_group_info))
+                group_info = json.loads(azure_group_info)
+                if name_value in group_info:
+                    group_name = group_info[name_value]
+                    group_description = ''
+                    if description_value in group_info:
+                        group_description = group_info[description_value]
+
+                        # Do regex search if enabled for group description
+                        description_pattern = Setting().get('azure_group_accounts_description_re')
+                        if description_pattern != '':
+                            current_app.logger.info('Matching group description {} against regex {}'.format(group_description, description_pattern))
+                            matches = re.match(description_pattern,group_description)
+                            if matches:
+                                current_app.logger.info('Group {} matched regexp'.format(group_description))
+                                group_description = matches.group(1)
+                            else:
+                                # Regexp didn't match, continue to next iteration
+                                next
+
+                    # Do regex search if enabled for group name
+                    pattern = Setting().get('azure_group_accounts_name_re')
+                    if pattern != '':
+                        current_app.logger.info('Matching group name {} against regex {}'.format(group_name, pattern))  
+                        matches = re.match(pattern,group_name)
+                        if matches:
+                            current_app.logger.info('Group {} matched regexp'.format(group_name))
+                            group_name = matches.group(1)
+                        else:
+                            # Regexp didn't match, continue to next iteration
+                            next
+
+                    account = Account()
+                    account_id = account.get_id_by_name(account_name=group_name)
+
+                    if account_id:
+                        account = Account.query.get(account_id)
+                        # check if user has permissions
+                        account_users = account.get_user()
+                        current_app.logger.info('Group: {} Users: {}'.format(
+                            group_name, 
+                            account_users))
+                        if user.id in account_users:
+                            current_app.logger.info('User id {} is already in account {}'.format(
+                                user.id, group_name))
+                        else:
+                            account.add_user(user)
+                            history = History(msg='Update account {0}'.format(
+                                account.name),
+                                created_by='System')
+                            history.add()
+                            current_app.logger.info('User {} added to Account {}'.format(
+                                user.username, account.name))
+                    else:
+                        account.name = group_name
+                        account.description = group_description
+                        account.contact = ''
+                        account.mail = ''
+                        account.create_account()
+                        history = History(msg='Create account {0}'.format(
+                            account.name), 
+                            created_by='System')
+                        history.add()
+
+                        account.add_user(user)
+                        history = History(msg='Update account {0}'.format(account.name),
+                                          created_by='System')
+                        history.add()
+                    current_app.logger.warning('group info: {} '.format(account_id))
+
+
         login_user(user, remember=False)
         signin_history(user.username, 'Azure OAuth', True)
         return redirect(url_for('index.index'))
@@ -297,11 +380,28 @@ def login():
                         firstname=oidc_givenname,
                         lastname=oidc_familyname,
                         email=oidc_email)
-
             result = user.create_local_user()
-            if not result['status']:
-                session.pop('oidc_token', None)
-                return redirect(url_for('index.login'))
+        else:
+            user.firstname = oidc_givenname
+            user.lastname = oidc_familyname
+            user.email = oidc_email
+            user.plain_text_password = None
+            result = user.update_local_user()
+
+        if not result['status']:
+            session.pop('oidc_token', None)
+            return redirect(url_for('index.login'))
+
+        if Setting().get('oidc_oauth_account_name_property') and Setting().get('oidc_oauth_account_description_property'):
+            name_prop = Setting().get('oidc_oauth_account_name_property')
+            desc_prop = Setting().get('oidc_oauth_account_description_property')
+            if name_prop in me and desc_prop in me:
+                account = handle_account(me[name_prop], me[desc_prop])
+                account.add_user(user)
+                user_accounts = user.get_accounts()
+                for ua in user_accounts:
+                    if ua.name != account.name:
+                        ua.remove_user(user)
 
         session['user_id'] = user.id
         session['authentication_type'] = 'OAuth'
@@ -436,6 +536,13 @@ def logout():
                 session_index=session['samlSessionIndex'],
                 name_id=session['samlNameId']))
 
+    redirect_uri = url_for('index.login')
+    oidc_logout = Setting().get('oidc_oauth_logout_url')
+
+    if 'oidc_token' in session and oidc_logout:
+        redirect_uri = "{}?redirect_uri={}".format(
+            oidc_logout, url_for('index.login', _external=True))
+
     # Clean cookies and flask session
     clear_session()
 
@@ -459,7 +566,7 @@ def logout():
 
         return res
 
-    return redirect(url_for('index.login'))
+    return redirect(redirect_uri)
 
 
 @index_bp.route('/register', methods=['GET', 'POST'])
@@ -873,7 +980,7 @@ def create_group_to_account_mapping():
     return group_to_account_mapping
 
 
-def handle_account(account_name):
+def handle_account(account_name, account_description=""):
     clean_name = ''.join(c for c in account_name.lower()
                          if c in "abcdefghijklmnopqrstuvwxyz0123456789")
     if len(clean_name) > Account.name.type.length:
@@ -882,13 +989,16 @@ def handle_account(account_name):
     account = Account.query.filter_by(name=clean_name).first()
     if not account:
         account = Account(name=clean_name.lower(),
-                          description='',
+                          description=account_description,
                           contact='',
                           mail='')
         account.create_account()
         history = History(msg='Account {0} created'.format(account.name),
-                          created_by='SAML Assertion')
+                          created_by='OIDC/SAML Assertion')
         history.add()
+    else:
+        account.description = account_description
+        account.update_account()
     return account
 
 

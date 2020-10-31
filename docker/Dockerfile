@@ -1,4 +1,4 @@
-FROM alpine:3.11 AS builder
+FROM alpine:3.12 AS builder
 LABEL maintainer="k@ndk.name"
 
 ARG BUILD_DEPENDENCIES="build-base \
@@ -6,7 +6,6 @@ ARG BUILD_DEPENDENCIES="build-base \
     libxml2-dev \
     mariadb-connector-c-dev \
     openldap-dev \
-    py3-pip \
     python3-dev \
     xmlsec-dev \
     yarn"
@@ -17,8 +16,11 @@ ENV LC_ALL=en_US.UTF-8 \
     FLASK_APP=/build/powerdnsadmin/__init__.py
 
 # Get dependencies
+# py3-pip should not belong to BUILD_DEPENDENCIES. Otherwise, when we remove
+# them with "apk del" at the end of build stage, the python requests module
+# will be removed as well - (Tested with alpine:3.12 and python 3.8.5).
 RUN apk add --no-cache ${BUILD_DEPENDENCIES} && \
-    ln -s /usr/bin/pip3 /usr/bin/pip
+    apk add --no-cache py3-pip
 
 WORKDIR /build
 
@@ -70,26 +72,31 @@ RUN pip install pip-autoremove && \
     pip uninstall -y pip-autoremove && \
     apk del ${BUILD_DEPENDENCIES}
 
-
 # Build image
-FROM alpine:3.11
+FROM alpine:3.12
 
-ENV FLASK_APP=/app/powerdnsadmin/__init__.py
+ENV FLASK_APP=/app/powerdnsadmin/__init__.py \
+    USER=pda
 
-RUN apk add --no-cache mariadb-connector-c postgresql-client py3-gunicorn py3-psycopg2 xmlsec tzdata && \
-    addgroup -S pda && \
-    adduser -S -D -G pda pda && \
+RUN apk add --no-cache mariadb-connector-c postgresql-client py3-gunicorn py3-psycopg2 xmlsec tzdata libcap && \
+    addgroup -S ${USER} && \
+    adduser -S -D -G ${USER} ${USER} && \
     mkdir /data && \
-    chown pda:pda /data
+    chown ${USER}:${USER} /data && \
+    setcap cap_net_bind_service=+ep $(readlink -f /usr/bin/python3) && \
+    apk del libcap
 
 COPY --from=builder /usr/bin/flask /usr/bin/
 COPY --from=builder /usr/lib/python3.8/site-packages /usr/lib/python3.8/site-packages/
-COPY --from=builder --chown=pda:pda /app /app/
+COPY --from=builder --chown=root:${USER} /app /app/
 COPY ./docker/entrypoint.sh /usr/bin/
 
 WORKDIR /app
+RUN chown ${USER}:${USER} ./configs && \
+    cat ./powerdnsadmin/default_config.py ./configs/docker_config.py > ./powerdnsadmin/docker_config.py
 
 EXPOSE 80/tcp
+USER ${USER}
 HEALTHCHECK CMD ["wget","--output-document=-","--quiet","--tries=1","http://127.0.0.1/"]
 ENTRYPOINT ["entrypoint.sh"]
-CMD ["gunicorn","powerdnsadmin:create_app()","--user","pda","--group","pda"]
+CMD ["gunicorn","powerdnsadmin:create_app()"]

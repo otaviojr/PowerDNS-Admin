@@ -91,7 +91,7 @@ def domain(domain_name):
                 # If it is reverse zone and pretty_ipv6_ptr setting
                 # is enabled, we reformat the name for ipv6 records.
                 if Setting().get('pretty_ipv6_ptr') and r[
-                        'type'] == 'PTR' and 'ip6.arpa' in r_name:
+                        'type'] == 'PTR' and 'ip6.arpa' in r_name and '*' not in r_name:
                     r_name = dns.reversename.to_address(
                         dns.name.from_text(r_name))
 
@@ -235,7 +235,7 @@ def add():
             abort(500)
 
     else:
-        accounts = Account.query.all()
+        accounts = Account.query.order_by(Account.name).all()
         return render_template('domain_add.html',
                                templates=templates,
                                accounts=accounts)
@@ -267,7 +267,7 @@ def setting(domain_name):
         if not domain:
             abort(404)
         users = User.query.all()
-        accounts = Account.query.all()
+        accounts = Account.query.order_by(Account.name).all()
 
         # get list of user ids to initialize selection data
         d = Domain(name=domain_name)
@@ -439,6 +439,15 @@ def record_apply(domain_name):
             history.add()
             return make_response(jsonify(result), 200)
         else:
+            history = History(
+                msg='Failed to apply record changes to domain {0}'.format(domain_name),
+                detail=str(
+                    json.dumps({
+                        "domain": domain_name,
+                        "msg": result['msg'],
+                    })),
+                created_by=current_user.username)
+            history.add()
             return make_response(jsonify(result), 400)
     except Exception as e:
         current_app.logger.error(

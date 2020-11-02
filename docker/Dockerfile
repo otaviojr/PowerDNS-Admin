@@ -91,12 +91,13 @@ COPY --from=builder /usr/lib/python3.8/site-packages /usr/lib/python3.8/site-pac
 COPY --from=builder --chown=root:${USER} /app /app/
 COPY ./docker/entrypoint.sh /usr/bin/
 
+COPY ./config.py /app
+
 WORKDIR /app
-RUN chown ${USER}:${USER} ./configs && \
-    cat ./powerdnsadmin/default_config.py ./configs/docker_config.py > ./powerdnsadmin/docker_config.py
+RUN chown ${USER}:${USER} ./configs
 
 EXPOSE 80/tcp
 USER ${USER}
 HEALTHCHECK CMD ["wget","--output-document=-","--quiet","--tries=1","http://127.0.0.1/"]
 ENTRYPOINT ["entrypoint.sh"]
-CMD ["gunicorn","powerdnsadmin:create_app()"]
+CMD ["FLASK_CONF=config.py","gunicorn","powerdnsadmin:create_app()"]

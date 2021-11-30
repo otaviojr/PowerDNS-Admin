@@ -21,6 +21,9 @@
   {% assets "css_main" -%}
       <link rel="stylesheet" href="{{ ASSET_URL }}">
   {%- endassets %}
+{% if SETTING.get('custom_css') %}
+  <link rel="stylesheet" href="/static/custom/{{ SETTING.get('custom_css') }}">
+{% endif %}
   <!-- HTML5 Shim and Respond.js IE8 support of HTML5 elements and media queries -->
   <!-- WARNING: Respond.js doesn't work if you view the page via file:// -->
   <!--[if lt IE 9]>
@@ -114,6 +117,11 @@
           <a href="{{ url_for('domain.add') }}"><i class="fa fa-plus"></i> <span>New Domain</span></a>
         </li>
         {% endif %}
+        {% if SETTING.get('allow_user_remove_domain') or current_user.role.name in ['Administrator', 'Operator'] %}
+        <li class="{{ 'active' if active_page == 'remove_domain' else '' }}">
+          <a href="{{ url_for('domain.remove') }}"><i class="fa fa-trash-o"></i> <span>Remove Domain</span></a>
+        </li>
+        {% endif %}
         {% if current_user.role.name in ['Administrator', 'Operator'] %}
         <li class="header">ADMINISTRATION</li>
         <li class="{{ 'active' if active_page == 'admin_console' else '' }}">
@@ -152,6 +160,11 @@
             <li><a href="{{ url_for('admin.setting_authentication') }}"><i class="fa fa-circle-o"></i> <span>Authentication</span></a></li>
             {% endif %}
           </ul>
+        </li>
+        {% elif SETTING.get('allow_user_view_history') %}
+        <li class="header">ADMINISTRATION</li>
+        <li class="{{ 'active' if active_page == 'admin_history' else '' }}">
+          <a href="{{ url_for('admin.history') }}"><i class="fa fa-calendar"></i> <span>History</span></a>
         </li>
         {% endif %}
       </ul>

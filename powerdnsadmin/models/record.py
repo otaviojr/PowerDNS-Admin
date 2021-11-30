@@ -65,6 +65,9 @@ class Record(object):
 
         rrsets=[]
         for r in jdata['rrsets']:
+            if len(r['records']) == 0:
+                continue
+
             while len(r['comments'])<len(r['records']):
                 r['comments'].append({"content": "", "account": ""})
             r['records'], r['comments'] = (list(t) for t in zip(*sorted(zip(r['records'], r['comments']), key=by_record_content_pair)))
@@ -162,6 +165,17 @@ class Record(object):
         for record in submitted_records:
             # Format the record name
             #
+            # Translate template placeholders into proper record data
+            record['record_data'] = record['record_data'].replace('[ZONE]', domain_name)
+            # Translate record name into punycode (IDN) as that's the only way
+            # to convey non-ascii records to the dns server
+            record['record_name'] = record['record_name'].encode('idna').decode()
+            #TODO: error handling
+            # If the record is an alias (CNAME), we will also make sure that
+            # the target domain is properly converted to punycode (IDN)
+            if record["record_type"] == 'CNAME':
+                record['record_data'] = record['record_data'].encode('idna').decode()
+                #TODO: error handling
             # If it is ipv6 reverse zone and PRETTY_IPV6_PTR is enabled,
             # We convert ipv6 address back to reverse record format
             # before submitting to PDNS API.
@@ -302,13 +316,26 @@ class Record(object):
         new_rrsets, del_rrsets = self.compare(domain_name, submitted_records)
 
         # Remove blank comments from rrsets for compatibility with some backends
+        def remove_blank_comments(rrset):
+            if not rrset['comments']:
+                del rrset['comments']
+            elif isinstance(rrset['comments'], list):
+                # Merge all non-blank comment values into a list
+                merged_comments = [
+                    v
+                    for c in rrset['comments']
+                    for v in c.values()
+                    if v
+                ]
+                # Delete comment if all values are blank (len(merged_comments) == 0)
+                if not merged_comments:
+                    del rrset['comments']
+
         for r in new_rrsets['rrsets']:
-            if not r['comments']:
-                del r['comments']
+            remove_blank_comments(r)
 
         for r in del_rrsets['rrsets']:
-            if not r['comments']:
-                del r['comments']
+            remove_blank_comments(r)
 
         # Submit the changes to PDNS API
         try:

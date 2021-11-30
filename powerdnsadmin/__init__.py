@@ -4,6 +4,7 @@ from flask import Flask
 from flask_seasurf import SeaSurf
 from flask_mail import Mail
 from werkzeug.middleware.proxy_fix import ProxyFix
+from flask_session import Session
 
 from .lib import utils
 
@@ -78,6 +79,12 @@ def create_app(config=None):
         from flask_sslify import SSLify
         _sslify = SSLify(app)  # lgtm [py/unused-local-variable]
 
+    # Load Flask-Session
+    if app.config.get('FILESYSTEM_SESSIONS_ENABLED'):
+        app.config['SESSION_TYPE'] = 'filesystem'
+        sess = Session()
+        sess.init_app(app)
+
     # SMTP
     app.mail = Mail(app)
 
@@ -95,6 +102,7 @@ def create_app(config=None):
         'email_to_gravatar_url'] = utils.email_to_gravatar_url
     app.jinja_env.filters[
         'display_setting_state'] = utils.display_setting_state
+    app.jinja_env.filters['pretty_domain_name'] = utils.pretty_domain_name
 
     # Register context proccessors
     from .models.setting import Setting

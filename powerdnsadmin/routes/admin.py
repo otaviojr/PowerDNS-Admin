@@ -1,12 +1,13 @@
 import json
 import datetime
 import traceback
+import re
 from base64 import b64encode
 from ast import literal_eval
 from flask import Blueprint, render_template, make_response, url_for, current_app, request, redirect, jsonify, abort, flash, session
 from flask_login import login_required, current_user
 
-from ..decorators import operator_role_required, admin_role_required
+from ..decorators import operator_role_required, admin_role_required, history_access_required
 from ..models.user import User
 from ..models.account import Account
 from ..models.account_user import AccountUser
@@ -15,10 +16,12 @@ from ..models.server import Server
 from ..models.setting import Setting
 from ..models.history import History
 from ..models.domain import Domain
+from ..models.domain_user import DomainUser
 from ..models.record import Record
 from ..models.domain_template import DomainTemplate
 from ..models.domain_template_record import DomainTemplateRecord
 from ..models.api_key import ApiKey
+from ..models.base import db
 
 from ..lib.schema import ApiPlainKeySchema
 
@@ -99,17 +102,17 @@ def edit_user(user_username=None):
         fdata = request.form
 
         if create:
-            user_username = fdata['username']
+            user_username = fdata.get('username', '').strip()
 
         user = User(username=user_username,
-                    plain_text_password=fdata['password'],
-                    firstname=fdata['firstname'],
-                    lastname=fdata['lastname'],
-                    email=fdata['email'],
+                    plain_text_password=fdata.get('password', ''),
+                    firstname=fdata.get('firstname', '').strip(),
+                    lastname=fdata.get('lastname', '').strip(),
+                    email=fdata.get('email', '').strip(),
                     reload_info=False)
 
         if create:
-            if fdata['password'] == "":
+            if not fdata.get('password', ''):
                 return render_template('admin_edit_user.html',
                                        user=user,
                                        create=create,
@@ -438,6 +441,7 @@ def edit_account(account_name=None):
     if request.method == 'GET':
         if account_name is None:
             return render_template('admin_edit_account.html',
+                                   account_user_ids=[],
                                    users=users,
                                    create=1)
 
@@ -579,7 +583,7 @@ def manage_account():
 
 @admin_bp.route('/history', methods=['GET', 'POST'])
 @login_required
-@operator_role_required
+@history_access_required
 def history():
     if request.method == 'POST':
         if current_user.role.name != 'Administrator':
@@ -608,7 +612,23 @@ def history():
                 }), 500)
 
     if request.method == 'GET':
-        histories = History.query.all()
+        if current_user.role.name in [ 'Administrator', 'Operator' ]:
+            histories = History.query.all()
+        else:
+            # if the user isn't an administrator or operator, 
+            # allow_user_view_history must be enabled to get here,
+            # so include history for the domains for the user
+            histories = db.session.query(History) \
+                .join(Domain, History.domain_id == Domain.id) \
+                .outerjoin(DomainUser, Domain.id == DomainUser.domain_id) \
+                .outerjoin(Account, Domain.account_id == Account.id) \
+                .outerjoin(AccountUser, Account.id == AccountUser.account_id) \
+                .filter(
+                db.or_(
+                    DomainUser.user_id == current_user.id,
+                    AccountUser.user_id == current_user.id
+                ))
+
         return render_template('admin_history.html', histories=histories)
 
 
@@ -622,9 +642,11 @@ def setting_basic():
             'login_ldap_first', 'default_record_table_size',
             'default_domain_table_size', 'auto_ptr', 'record_quick_edit',
             'pretty_ipv6_ptr', 'dnssec_admins_only',
-            'allow_user_create_domain', 'bg_domain_updates', 'site_name',
+            'allow_user_create_domain', 'allow_user_remove_domain', 'allow_user_view_history', 'bg_domain_updates', 'site_name',
             'session_timeout', 'warn_session_timeout', 'ttl_options',
-            'pdns_api_timeout', 'verify_ssl_connections', 'verify_user_email'
+
+            'pdns_api_timeout', 'verify_ssl_connections', 'verify_user_email',
+	          'delete_sso_accounts', 'otp_field_enabled', 'custom_css', 'enable_api_rr_history'
         ]
 
         return render_template('admin_setting_basic.html', settings=settings)
@@ -811,6 +833,27 @@ def setting_authentication():
                 Setting().set('ldap_user_group',
                               request.form.get('ldap_user_group'))
                 Setting().set('ldap_domain', request.form.get('ldap_domain'))
+                Setting().set(
+                    'autoprovisioning', True
+                    if request.form.get('autoprovisioning') == 'ON' else False)
+                Setting().set('autoprovisioning_attribute',
+                              request.form.get('autoprovisioning_attribute'))
+
+                if request.form.get('autoprovisioning')=='ON':
+                    if  validateURN(request.form.get('urn_value')):
+                        Setting().set('urn_value',
+                                       request.form.get('urn_value'))
+                    else:
+                        return render_template('admin_setting_authentication.html',
+                                    error="Invalid urn")
+                else:
+                    Setting().set('urn_value',
+                                       request.form.get('urn_value'))
+
+                Setting().set('purge', True
+                    if request.form.get('purge') == 'ON' else False)
+
+
                 result = {'status': True, 'msg': 'Saved successfully'}
         elif conf_type == 'google':
             google_oauth_enabled = True if request.form.get(
@@ -945,6 +988,8 @@ def setting_authentication():
                               request.form.get('oidc_oauth_token_url'))
                 Setting().set('oidc_oauth_authorize_url',
                               request.form.get('oidc_oauth_authorize_url'))
+                Setting().set('oidc_oauth_logout_url',
+                              request.form.get('oidc_oauth_logout_url'))
                 Setting().set('oidc_oauth_username',
                               request.form.get('oidc_oauth_username'))
                 Setting().set('oidc_oauth_firstname',
@@ -1268,3 +1313,29 @@ def global_search():
                     pass
 
         return render_template('admin_global_search.html', domains=domains, records=records, comments=comments)
+
+def validateURN(value):
+    NID_PATTERN = re.compile(r'^[0-9a-z][0-9a-z-]{1,31}$', flags=re.IGNORECASE)
+    NSS_PCHAR = '[a-z0-9-._~]|%[a-f0-9]{2}|[!$&\'()*+,;=]|:|@'
+    NSS_PATTERN = re.compile(fr'^({NSS_PCHAR})({NSS_PCHAR}|/|\?)*$', re.IGNORECASE)
+
+    prefix=value.split(':')
+    if (len(prefix)<3):
+        current_app.logger.warning( "Too small urn prefix" )
+        return False
+
+    urn=prefix[0]
+    nid=prefix[1]
+    nss=value.replace(urn+":"+nid+":", "")
+
+    if not urn.lower()=="urn":
+        current_app.logger.warning( urn + ' contains invalid characters ' )
+        return False
+    if not re.match(NID_PATTERN, nid.lower()):
+        current_app.logger.warning( nid + ' contains invalid characters ' )
+        return False
+    if not re.match(NSS_PATTERN, nss):
+        current_app.logger.warning( nss + ' contains invalid characters ' )
+        return False
+
+    return True

@@ -8,6 +8,7 @@ import ipaddress
 from collections.abc import Iterable
 from distutils.version import StrictVersion
 from urllib.parse import urlparse
+from datetime import datetime, timedelta
 
 
 def auth_from_url(url):
@@ -103,6 +104,13 @@ def fetch_json(remote_url,
     data = None
     try:
         data = json.loads(r.content.decode('utf-8'))
+    except UnicodeDecodeError:
+        # If the decoding fails, switch to slower but probably working .json()
+        try:
+            logging.warning("UTF-8 content.decode failed, switching to slower .json method")
+            data = r.json()
+        except Exception as e:
+            raise e
     except Exception as e:
         raise RuntimeError(
             'Error while loading JSON data from {0}'.format(remote_url)) from e
@@ -228,3 +236,22 @@ class customBoxes:
         "inaddrarpa": ("in-addr", "%.in-addr.arpa")
     }
     order = ["reverse", "ip6arpa", "inaddrarpa"]
+
+def pretty_domain_name(value):
+    """
+    Display domain name in original format.
+    If it is IDN domain (Punycode starts with xn--), do the
+    idna decoding.
+    Note that any part of the domain name can be individually punycoded
+    """
+    if isinstance(value, str):
+        if value.startswith('xn--') \
+        or value.find('.xn--') != -1:
+            try:
+                return value.encode().decode('idna')
+            except:
+                raise Exception("Cannot decode IDN domain")
+        else:
+            return value
+    else:
+        raise Exception("Require the Punycode in string format")

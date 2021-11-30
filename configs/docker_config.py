@@ -5,6 +5,9 @@ SQLALCHEMY_DATABASE_URI = 'sqlite:////data/powerdns-admin.db'
 
 legal_envvars = (
     'SECRET_KEY',
+    'OIDC_OAUTH_API_URL',
+    'OIDC_OAUTH_TOKEN_URL',
+    'OIDC_OAUTH_AUTHORIZE_URL',
     'BIND_ADDRESS',
     'PORT',
     'LOG_LEVEL',
@@ -47,7 +50,13 @@ legal_envvars = (
     'SAML_ASSERTION_ENCRYPTED',
     'OFFLINE_MODE',
     'REMOTE_USER_LOGOUT_URL',
-    'REMOTE_USER_COOKIES'
+    'REMOTE_USER_COOKIES',
+    'SIGNUP_ENABLED',
+    'LOCAL_DB_ENABLED',
+    'LDAP_ENABLED',
+    'SAML_CERT',
+    'SAML_KEY',
+    'FILESYSTEM_SESSIONS_ENABLED'
 )
 
 legal_envvars_int = ('PORT', 'MAIL_PORT', 'SAML_METADATA_CACHE_LIFETIME')
@@ -65,7 +74,11 @@ legal_envvars_bool = (
     'SAML_LOGOUT',
     'SAML_ASSERTION_ENCRYPTED',
     'OFFLINE_MODE',
-    'REMOTE_USER_ENABLED'
+    'REMOTE_USER_ENABLED',
+    'SIGNUP_ENABLED',
+    'LOCAL_DB_ENABLED',
+    'LDAP_ENABLED',
+    'FILESYSTEM_SESSIONS_ENABLED'
 )
 
 # import everything from environment variables

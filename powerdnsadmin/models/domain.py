@@ -519,6 +519,13 @@ class Domain(db.Model):
             domain_setting.delete()
         domain.apikeys[:] = []
 
+        # Remove history for domain
+        domain_history = History.query.filter(
+            History.domain_id == domain.id
+        )
+        if domain_history:
+           domain_history.delete()
+
         # then remove domain
         Domain.query.filter(Domain.name == domain_name).delete()
         if do_commit:
@@ -574,6 +581,33 @@ class Domain(db.Model):
                 'Cannot grant user privileges to domain {0}. DETAIL: {1}'.
                     format(self.name, e))
             current_app.logger.debug(print(traceback.format_exc()))
+
+    def revoke_privileges_by_id(self, user_id):
+        """
+        Remove a single user from privilege list based on user_id
+        """
+        new_uids = [u for u in self.get_user() if u != user_id]
+        users = []
+        for uid in new_uids:
+            users.append(User(id=uid).get_user_info_by_id().username)
+
+        self.grant_privileges(users)
+
+    def add_user(self, user):
+        """
+        Add a single user to Domain by User
+        """
+        try:
+            du = DomainUser(self.id, user.id)
+            db.session.add(du)
+            db.session.commit()
+            return True
+        except Exception as e:
+            db.session.rollback()
+            current_app.logger.error(
+                'Cannot add user privileges on domain {0}. DETAIL: {1}'.
+                format(self.name, e))
+            return False
 
     def update_from_master(self, domain_name):
         """

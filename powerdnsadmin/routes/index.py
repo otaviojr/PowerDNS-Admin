@@ -43,7 +43,6 @@ index_bp = Blueprint('index',
                      template_folder='templates',
                      url_prefix='/')
 
-
 @index_bp.before_app_first_request
 def register_modules():
     global google
@@ -282,46 +281,52 @@ def login():
         # Handle account/group creation, if enabled
         if Setting().get('azure_group_accounts_enabled') and mygroups:
             current_app.logger.info('Azure group account sync enabled')
+            name_value = Setting().get('azure_group_accounts_name')
+            description_value = Setting().get('azure_group_accounts_description')
+            select_values = name_value
+            if description_value != '':
+                select_values += ',' + description_value
+
+            mygroups = get_azure_groups(
+                'me/memberOf/microsoft.graph.group?$count=false&$securityEnabled=true&$select={}'.format(select_values))
+
+            description_pattern = Setting().get('azure_group_accounts_description_re')
+            pattern = Setting().get('azure_group_accounts_name_re')
+
+            # Loop through users security groups
             for azure_group in mygroups:
-
-                name_value = Setting().get('azure_group_accounts_name')
-                description_value = Setting().get('azure_group_accounts_description')
-
-                select_values = name_value
-                if description_value != '':
-                    select_values += ',' + description_value
-                azure_group_info = azure.get('groups/{}?$select={}'.format(azure_group, select_values)).text
-                current_app.logger.info('Group name for {}: {}'.format(azure_group, azure_group_info))
-                group_info = json.loads(azure_group_info)
-                if name_value in group_info:
-                    group_name = group_info[name_value]
+                if name_value in azure_group:
+                    group_name = azure_group[name_value]
                     group_description = ''
-                    if description_value in group_info:
-                        group_description = group_info[description_value]
+                    if description_value in azure_group:
+                        group_description = azure_group[description_value]
 
                         # Do regex search if enabled for group description
-                        description_pattern = Setting().get('azure_group_accounts_description_re')
                         if description_pattern != '':
-                            current_app.logger.info('Matching group description {} against regex {}'.format(group_description, description_pattern))
-                            matches = re.match(description_pattern,group_description)
+                            current_app.logger.info('Matching group description {} against regex {}'.format(
+                                group_description, description_pattern))
+                            matches = re.match(
+                                description_pattern, group_description)
                             if matches:
-                                current_app.logger.info('Group {} matched regexp'.format(group_description))
+                                current_app.logger.info(
+                                    'Group {} matched regexp'.format(group_description))
                                 group_description = matches.group(1)
                             else:
                                 # Regexp didn't match, continue to next iteration
-                                next
+                                continue
 
                     # Do regex search if enabled for group name
-                    pattern = Setting().get('azure_group_accounts_name_re')
                     if pattern != '':
-                        current_app.logger.info('Matching group name {} against regex {}'.format(group_name, pattern))  
-                        matches = re.match(pattern,group_name)
+                        current_app.logger.info(
+                            'Matching group name {} against regex {}'.format(group_name, pattern))
+                        matches = re.match(pattern, group_name)
                         if matches:
-                            current_app.logger.info('Group {} matched regexp'.format(group_name))
+                            current_app.logger.info(
+                                'Group {} matched regexp'.format(group_name))
                             group_name = matches.group(1)
                         else:
                             # Regexp didn't match, continue to next iteration
-                            next
+                            continue
 
                     account = Account()
                     account_id = account.get_id_by_name(account_name=group_name)
@@ -392,16 +397,39 @@ def login():
             session.pop('oidc_token', None)
             return redirect(url_for('index.login'))
 
+        #This checks if the account_name_property and account_description property were included in settings.
         if Setting().get('oidc_oauth_account_name_property') and Setting().get('oidc_oauth_account_description_property'):
+
+            #Gets the name_property and description_property.
             name_prop = Setting().get('oidc_oauth_account_name_property')
             desc_prop = Setting().get('oidc_oauth_account_description_property')
+
+            account_to_add = []
+	    #If the name_property and desc_property exist in me (A variable that contains all the userinfo from the IdP).
             if name_prop in me and desc_prop in me:
-                account = handle_account(me[name_prop], me[desc_prop])
-                account.add_user(user)
+                accounts_name_prop = [me[name_prop]] if type(me[name_prop]) is not list else me[name_prop]
+                accounts_desc_prop = [me[desc_prop]] if type(me[desc_prop]) is not list else me[desc_prop]
+		
+                #Run on all groups the user is in by the index num.
+                for i in range(len(accounts_name_prop)):
+                    description = ''
+                    if i < len(accounts_desc_prop):
+                        description = accounts_desc_prop[i]
+                    account = handle_account(accounts_name_prop[i], description)
+
+                    account_to_add.append(account)
                 user_accounts = user.get_accounts()
-                for ua in user_accounts:
-                    if ua.name != account.name:
-                        ua.remove_user(user)
+                
+		# Add accounts
+                for account in account_to_add:
+                    if account not in user_accounts:
+                        account.add_user(user)
+
+                # Remove accounts if the setting is enabled
+                if Setting().get('delete_sso_accounts'):
+                    for account in user_accounts:
+                        if account not in account_to_add:
+                              account.remove_user(user)
 
         session['user_id'] = user.id
         session['authentication_type'] = 'OAuth'
@@ -467,9 +495,38 @@ def login():
                                        saml_enabled=SAML_ENABLED,
                                        error='Token required')
 
+        if Setting().get('autoprovisioning') and auth_method!='LOCAL': 
+            urn_value=Setting().get('urn_value')
+            Entitlements=user.read_entitlements(Setting().get('autoprovisioning_attribute'))
+            if len(Entitlements)==0 and Setting().get('purge'):
+                user.set_role("User")
+                user.revoke_privilege(True)
+                
+            elif len(Entitlements)!=0:
+                if checkForPDAEntries(Entitlements, urn_value):
+                    user.updateUser(Entitlements)
+                else:
+                    current_app.logger.warning('Not a single powerdns-admin record was found, possibly a typo in the prefix')
+                    if Setting().get('purge'):
+                        user.set_role("User")
+                        user.revoke_privilege(True)
+                        current_app.logger.warning('Procceding to revoke every privilige from ' + user.username + '.' )
+
         login_user(user, remember=remember_me)
         signin_history(user.username, 'LOCAL', True)
         return redirect(session.get('next', url_for('index.index')))
+
+def checkForPDAEntries(Entitlements, urn_value):
+    """
+    Run through every record located in the ldap attribute given and determine if there are any valid powerdns-admin records
+    """
+    urnArguments=[x.lower() for x in urn_value.split(':')]
+    for Entitlement in Entitlements:
+        entArguments=Entitlement.split(':powerdns-admin')
+        entArguments=[x.lower() for x in entArguments[0].split(':')]
+        if (entArguments==urnArguments):
+            return True
+    return False
 
 
 def clear_session():
@@ -511,6 +568,21 @@ def signin_history(username, authenticator, success):
                 "success": 1 if success else 0
             }),
             created_by='System').add()
+
+# Get a list of Azure security groups the user is a member of
+def get_azure_groups(uri):
+    azure_info = azure.get(uri).text
+    current_app.logger.info('Azure groups returned: ' + azure_info)
+    grouplookup = json.loads(azure_info)
+    if "value" in grouplookup:
+        mygroups = grouplookup["value"]
+        # If "@odata.nextLink" exists in the results, we need to get more groups
+        if "@odata.nextLink" in grouplookup:
+            # The additional groups are added to the existing array
+            mygroups.extend(get_azure_groups(grouplookup["@odata.nextLink"]))
+    else:
+        mygroups = []
+    return mygroups
 
 
 @index_bp.route('/logout')
@@ -575,12 +647,12 @@ def register():
         if request.method == 'GET':
             return render_template('register.html')
         elif request.method == 'POST':
-            username = request.form['username']
-            password = request.form['password']
-            firstname = request.form.get('firstname')
-            lastname = request.form.get('lastname')
-            email = request.form.get('email')
-            rpassword = request.form.get('rpassword')
+            username = request.form.get('username', '').strip()
+            password = request.form.get('password', '')
+            firstname = request.form.get('firstname', '').strip()
+            lastname = request.form.get('lastname', '').strip()
+            email = request.form.get('email', '').strip()
+            rpassword = request.form.get('rpassword', '')
 
             if not username or not password or not email:
                 return render_template(
@@ -750,7 +822,8 @@ def dyndns_update():
                     msg=
                     "DynDNS update: attempted update of {0} but record already up-to-date"
                     .format(hostname),
-                    created_by=current_user.username)
+                    created_by=current_user.username,
+                    domain_id=domain.id)
                 history.add()
             else:
                 oldip = r.data
@@ -765,7 +838,8 @@ def dyndns_update():
                             "old_value": oldip,
                             "new_value": str(ip)
                         }),
-                        created_by=current_user.username)
+                        created_by=current_user.username,
+                        domain_id=domain.id)
                     history.add()
                     response = 'good'
                 else:
@@ -804,7 +878,8 @@ def dyndns_update():
                             "record": hostname,
                             "value": str(ip)
                         }),
-                        created_by=current_user.username)
+                        created_by=current_user.username,
+                        domain_id=domain.id)
                     history.add()
                     response = 'good'
         else:
@@ -919,7 +994,7 @@ def saml_authorized():
         else:
             user_groups = []
         if admin_attribute_name or group_attribute_name:
-            user_accounts = set(user.get_account())
+            user_accounts = set(user.get_accounts())
             saml_accounts = []
             for group_mapping in group_to_account_mapping:
                 mapping = group_mapping.split('=')

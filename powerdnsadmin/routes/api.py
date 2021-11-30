@@ -1,5 +1,6 @@
 import json
 from urllib.parse import urljoin
+from base64 import b64encode
 from flask import (
     Blueprint, g, request, abort, current_app, make_response, jsonify,
 )
@@ -13,17 +14,21 @@ from ..models import (
 from ..lib import utils, helper
 from ..lib.schema import (
     ApiKeySchema, DomainSchema, ApiPlainKeySchema, UserSchema, AccountSchema,
+    UserDetailedSchema,
 )
 from ..lib.errors import (
     StructuredException,
     DomainNotExists, DomainAlreadyExists, DomainAccessForbidden,
     RequestIsNotJSON, ApiKeyCreateFail, ApiKeyNotUsable, NotEnoughPrivileges,
     AccountCreateFail, AccountUpdateFail, AccountDeleteFail,
-    UserCreateFail, UserUpdateFail, UserDeleteFail,
+    AccountCreateDuplicate,
+    UserCreateFail, UserCreateDuplicate, UserUpdateFail, UserDeleteFail,
+    UserUpdateFailEmail,
 )
 from ..decorators import (
     api_basic_auth, api_can_create_domain, is_json, apikey_auth,
     apikey_is_admin, apikey_can_access_domain, api_role_can,
+    apikey_or_basic_auth,
 )
 import random
 import string
@@ -31,11 +36,14 @@ import string
 api_bp = Blueprint('api', __name__, url_prefix='/api/v1')
 
 apikey_schema = ApiKeySchema(many=True)
+apikey_single_schema = ApiKeySchema()
 domain_schema = DomainSchema(many=True)
-apikey_plain_schema = ApiPlainKeySchema(many=True)
+apikey_plain_schema = ApiPlainKeySchema()
 user_schema = UserSchema(many=True)
+user_single_schema = UserSchema()
+user_detailed_schema = UserDetailedSchema()
 account_schema = AccountSchema(many=True)
-
+account_single_schema = AccountSchema()
 
 def get_user_domains():
     domains = db.session.query(Domain) \
@@ -91,62 +99,62 @@ def get_role_id(role_name, role_id=None):
 
 @api_bp.errorhandler(400)
 def handle_400(err):
-    return json.dumps({"msg": "Bad Request"}), 400
+    return jsonify({"msg": "Bad Request"}), 400
 
 
 @api_bp.errorhandler(401)
 def handle_401(err):
-    return json.dumps({"msg": "Unauthorized"}), 401
+    return jsonify({"msg": "Unauthorized"}), 401
 
 
 @api_bp.errorhandler(409)
 def handle_409(err):
-    return json.dumps({"msg": "Conflict"}), 409
+    return jsonify({"msg": "Conflict"}), 409
 
 
 @api_bp.errorhandler(500)
 def handle_500(err):
-    return json.dumps({"msg": "Internal Server Error"}), 500
+    return jsonify({"msg": "Internal Server Error"}), 500
 
 
 @api_bp.errorhandler(StructuredException)
 def handle_StructuredException(err):
-    return json.dumps(err.to_dict()), err.status_code
+    return jsonify(err.to_dict()), err.status_code
 
 
 @api_bp.errorhandler(DomainNotExists)
 def handle_domain_not_exists(err):
-    return json.dumps(err.to_dict()), err.status_code
+    return jsonify(err.to_dict()), err.status_code
 
 
 @api_bp.errorhandler(DomainAlreadyExists)
 def handle_domain_already_exists(err):
-    return json.dumps(err.to_dict()), err.status_code
+    return jsonify(err.to_dict()), err.status_code
 
 
 @api_bp.errorhandler(DomainAccessForbidden)
 def handle_domain_access_forbidden(err):
-    return json.dumps(err.to_dict()), err.status_code
+    return jsonify(err.to_dict()), err.status_code
 
 
 @api_bp.errorhandler(ApiKeyCreateFail)
 def handle_apikey_create_fail(err):
-    return json.dumps(err.to_dict()), err.status_code
+    return jsonify(err.to_dict()), err.status_code
 
 
 @api_bp.errorhandler(ApiKeyNotUsable)
 def handle_apikey_not_usable(err):
-    return json.dumps(err.to_dict()), err.status_code
+    return jsonify(err.to_dict()), err.status_code
 
 
 @api_bp.errorhandler(NotEnoughPrivileges)
 def handle_not_enough_privileges(err):
-    return json.dumps(err.to_dict()), err.status_code
+    return jsonify(err.to_dict()), err.status_code
 
 
 @api_bp.errorhandler(RequestIsNotJSON)
 def handle_request_is_not_json(err):
-    return json.dumps(err.to_dict()), err.status_code
+    return jsonify(err.to_dict()), err.status_code
 
 
 @api_bp.before_request
@@ -198,10 +206,15 @@ def api_login_create_zone():
         current_app.logger.debug("Request to powerdns API successful")
         data = request.get_json(force=True)
 
+        domain = Domain()
+        domain.update()
+        domain_id = domain.get_id_by_name(data['name'].rstrip('.'))
+
         history = History(msg='Add domain {0}'.format(
             data['name'].rstrip('.')),
                           detail=json.dumps(data),
-                          created_by=current_user.username)
+                          created_by=current_user.username,
+                          domain_id=domain_id)
         history.add()
 
         if current_user.role.name not in ['Administrator', 'Operator']:
@@ -210,9 +223,6 @@ def api_login_create_zone():
             domain = Domain(name=data['name'].rstrip('.'))
             domain.update()
             domain.grant_privileges([current_user.id])
-
-        domain = Domain()
-        domain.update()
 
     if resp.status_code == 409:
         raise (DomainAlreadyExists)
@@ -229,7 +239,7 @@ def api_login_list_zones():
         domain_obj_list = Domain.query.all()
 
     domain_obj_list = [] if domain_obj_list is None else domain_obj_list
-    return json.dumps(domain_schema.dump(domain_obj_list)), 200
+    return jsonify(domain_schema.dump(domain_obj_list)), 200
 
 
 @api_bp.route('/pdnsadmin/zones/<string:domain_name>', methods=['DELETE'])
@@ -270,13 +280,18 @@ def api_login_delete_zone(domain_name):
         if resp.status_code == 204:
             current_app.logger.debug("Request to powerdns API successful")
 
-            history = History(msg='Delete domain {0}'.format(domain_name),
+            domain = Domain()
+            domain_id = domain.get_id_by_name(domain_name)
+            domain.update()
+
+            history = History(msg='Delete domain {0}'.format(
+                pretty_domain_name(domain_name)),
                               detail='',
-                              created_by=current_user.username)
+                              created_by=current_user.username,
+                              domain_id=domain_id)
             history.add()
 
-            domain = Domain()
-            domain.update()
+
     except Exception as e:
         current_app.logger.error('Error: {0}'.format(e))
         abort(500)
@@ -293,13 +308,23 @@ def api_generate_apikey():
     apikey = None
     domain_obj_list = []
 
-    abort(400) if 'domains' not in data else None
-    abort(400) if not isinstance(data['domains'], (list, )) else None
     abort(400) if 'role' not in data else None
 
+    if 'domains' not in data:
+        domains = []
+    elif not isinstance(data['domains'], (list, )):
+        abort(400)
+    else:
+        domains = [d['name'] if isinstance(d, dict) else d for d in data['domains']]
+
     description = data['description'] if 'description' in data else None
-    role_name = data['role']
-    domains = data['domains']
+
+    if isinstance(data['role'], str):
+        role_name = data['role']
+    elif isinstance(data['role'], dict) and 'name' in data['role'].keys():
+        role_name = data['role']['name']
+    else:
+        abort(400)
 
     if role_name == 'User' and len(domains) == 0:
         current_app.logger.error("Apikey with User role must have domains")
@@ -346,7 +371,8 @@ def api_generate_apikey():
         current_app.logger.error('Error: {0}'.format(e))
         raise ApiKeyCreateFail(message='Api key create failed')
 
-    return json.dumps(apikey_plain_schema.dump([apikey])), 201
+    apikey.plain_key = b64encode(apikey.plain_key.encode('utf-8')).decode('utf-8')
+    return jsonify(apikey_plain_schema.dump(apikey)), 201
 
 
 @api_bp.route('/pdnsadmin/apikeys', defaults={'domain_name': None})
@@ -387,7 +413,24 @@ def api_get_apikeys(domain_name):
             current_app.logger.error('Error: {0}'.format(e))
             abort(500)
 
-    return json.dumps(apikey_schema.dump(apikeys)), 200
+    return jsonify(apikey_schema.dump(apikeys)), 200
+
+
+@api_bp.route('/pdnsadmin/apikeys/<int:apikey_id>', methods=['GET'])
+@api_basic_auth
+def api_get_apikey(apikey_id):
+    apikey = ApiKey.query.get(apikey_id)
+
+    if not apikey:
+        abort(404)
+
+    current_app.logger.debug(current_user.role.name)
+
+    if current_user.role.name not in ['Administrator', 'Operator']:
+        if apikey_id not in [a.id for a in get_user_apikeys()]:
+            raise DomainAccessForbidden()
+
+    return jsonify(apikey_single_schema.dump(apikey)), 200
 
 
 @api_bp.route('/pdnsadmin/apikeys/<int:apikey_id>', methods=['DELETE'])
@@ -435,9 +478,24 @@ def api_update_apikey(apikey_id):
     # that domains update domains
     data = request.get_json()
     description = data['description'] if 'description' in data else None
-    role_name = data['role'] if 'role' in data else None
-    domains = data['domains'] if 'domains' in data else None
     domain_obj_list = None
+
+    if 'role' in data:
+        if isinstance(data['role'], str):
+            role_name = data['role']
+        elif isinstance(data['role'], dict) and 'name' in data['role'].keys():
+            role_name = data['role']['name']
+        else:
+            abort(400)
+    else:
+        role_name = None
+
+    if 'domains' not in data:
+        domains = None
+    elif not isinstance(data['domains'], (list, )):
+        abort(400)
+    else:
+        domains = [d['name'] if isinstance(d, dict) else d for d in data['domains']]
 
     apikey = ApiKey.query.get(apikey_id)
 
@@ -520,12 +578,12 @@ def api_update_apikey(apikey_id):
 def api_list_users(username=None):
     if username is None:
         user_list = [] or User.query.all()
+        return jsonify(user_schema.dump(user_list)), 200
     else:
-        user_list = [] or User.query.filter(User.username == username).all()
-        if not user_list:
+        user = User.query.filter(User.username == username).first()
+        if user is None:
             abort(404)
-
-    return json.dumps(user_schema.dump(user_list)), 200
+        return jsonify(user_detailed_schema.dump(user)), 200
 
 
 @api_bp.route('/pdnsadmin/users', methods=['POST'])
@@ -593,12 +651,12 @@ def api_create_user():
     if not result['status']:
         current_app.logger.warning('Create user ({}, {}) error: {}'.format(
             username, email, result['msg']))
-        raise UserCreateFail(message=result['msg'])
+        raise UserCreateDuplicate(message=result['msg'])
 
     history = History(msg='Created user {0}'.format(user.username),
                       created_by=current_user.username)
     history.add()
-    return json.dumps(user_schema.dump([user])), 201
+    return jsonify(user_single_schema.dump(user)), 201
 
 
 @api_bp.route('/pdnsadmin/users/<int:user_id>', methods=['PUT'])
@@ -662,7 +720,10 @@ def api_update_user(user_id):
     if not result['status']:
         current_app.logger.warning('Update user ({}, {}) error: {}'.format(
             username, email, result['msg']))
-        raise UserCreateFail(message=result['msg'])
+        if result['msg'].startswith('New email'):
+            raise UserUpdateFailEmail(message=result['msg'])
+        else:
+            raise UserCreateFail(message=result['msg'])
 
     history = History(msg='Updated user {0}'.format(user.username),
                       created_by=current_user.username)
@@ -713,12 +774,13 @@ def api_list_accounts(account_name):
     else:
         if account_name is None:
             account_list = [] or Account.query.all()
+            return jsonify(account_schema.dump(account_list)), 200
         else:
-            account_list = [] or Account.query.filter(
-                Account.name == account_name).all()
-            if not account_list:
+            account = Account.query.filter(
+                Account.name == account_name).first()
+            if account is None:
                 abort(404)
-    return json.dumps(account_schema.dump(account_list)), 200
+            return jsonify(account_single_schema.dump(account)), 200
 
 
 @api_bp.route('/pdnsadmin/accounts', methods=['POST'])
@@ -736,6 +798,12 @@ def api_create_account():
         current_app.logger.debug("Account name missing")
         abort(400)
 
+    account_exists = [] or Account.query.filter(Account.name == name).all()
+    if len(account_exists) > 0:
+        msg = "Account {} already exists".format(name)
+        current_app.logger.debug(msg)
+        raise AccountCreateDuplicate(message=msg)
+
     account = Account(name=name,
                       description=description,
                       contact=contact,
@@ -752,7 +820,7 @@ def api_create_account():
     history = History(msg='Create account {0}'.format(account.name),
                       created_by=current_user.username)
     history.add()
-    return json.dumps(account_schema.dump([account])), 201
+    return jsonify(account_single_schema.dump(account)), 201
 
 
 @api_bp.route('/pdnsadmin/accounts/<int:account_id>', methods=['PUT'])
@@ -817,6 +885,7 @@ def api_delete_account(account_id):
 
 
 @api_bp.route('/pdnsadmin/accounts/users/<int:account_id>', methods=['GET'])
+@api_bp.route('/pdnsadmin/accounts/<int:account_id>/users', methods=['GET'])
 @api_basic_auth
 @api_role_can('list account users')
 def api_list_account_users(account_id):
@@ -825,11 +894,14 @@ def api_list_account_users(account_id):
         abort(404)
     user_list = User.query.join(AccountUser).filter(
         AccountUser.account_id == account_id).all()
-    return json.dumps(user_schema.dump(user_list)), 200
+    return jsonify(user_schema.dump(user_list)), 200
 
 
 @api_bp.route(
     '/pdnsadmin/accounts/users/<int:account_id>/<int:user_id>',
+    methods=['PUT'])
+@api_bp.route(
+    '/pdnsadmin/accounts/<int:account_id>/users/<int:user_id>',
     methods=['PUT'])
 @api_basic_auth
 @api_role_can('add user to account')
@@ -845,7 +917,7 @@ def api_add_account_user(account_id, user_id):
             user.username, account.name))
 
     history = History(
-        msg='Revoke {} user privileges on {}'.format(
+        msg='Add {} user privileges on {}'.format(
             user.username, account.name),
         created_by=current_user.username)
     history.add()
@@ -854,6 +926,9 @@ def api_add_account_user(account_id, user_id):
 
 @api_bp.route(
     '/pdnsadmin/accounts/users/<int:account_id>/<int:user_id>',
+    methods=['DELETE'])
+@api_bp.route(
+    '/pdnsadmin/accounts/<int:account_id>/users/<int:user_id>',
     methods=['DELETE'])
 @api_basic_auth
 @api_role_can('remove user from account')
@@ -898,35 +973,36 @@ def api_zone_subpath_forward(server_id, zone_id, subpath):
 @apikey_can_access_domain
 def api_zone_forward(server_id, zone_id):
     resp = helper.forward_request()
-    domain = Domain()
-    domain.update()
+    if not Setting().get('bg_domain_updates'):
+        domain = Domain()
+        domain.update()
     status = resp.status_code
     if 200 <= status < 300:
         current_app.logger.debug("Request to powerdns API successful")
-        if request.method != 'GET' and request.method != 'DELETE':
-            data = request.get_json(force=True)
-            for rrset_data in data['rrsets']:
-                history = History(msg='{0} zone {1} record of {2}'.format(
-                    rrset_data['changetype'].lower(), rrset_data['type'],
-                    rrset_data['name'].rstrip('.')),
-                                  detail=json.dumps(data),
-                                  created_by=g.apikey.description)
+        if Setting().get('enable_api_rr_history'):
+            if request.method in ['POST', 'PATCH'] :
+                data = request.get_json(force=True)
+                for rrset_data in data['rrsets']:
+                    history = History(msg='{0} zone {1} record of {2}'.format(
+                        rrset_data['changetype'].lower(), rrset_data['type'],
+                        rrset_data['name'].rstrip('.')),
+                                    detail=json.dumps(data),
+                                    created_by=g.apikey.description,
+                                    domain_id=Domain().get_id_by_name(zone_id.rstrip('.')))
+                    history.add()
+            elif request.method == 'DELETE':
+                history = History(msg='Deleted zone {0}'.format(zone_id.rstrip('.')),
+                                  detail='',
+                                  created_by=g.apikey.description,
+                                  domain_id=Domain().get_id_by_name(zone_id.rstrip('.')))
                 history.add()
-        elif request.method == 'DELETE':
-            history = History(msg='Deleted zone {0}'.format(domain.name),
-                              detail='',
-                              created_by=g.apikey.description)
-            history.add()
+            elif request.method != 'GET':
+                history = History(msg='Updated zone {0}'.format(zone_id.rstrip('.')),
+                                  detail='',
+                                  created_by=g.apikey.description,
+                                  domain_id=Domain().get_id_by_name(zone_id.rstrip('.')))
+                history.add()
     return resp.content, resp.status_code, resp.headers.items()
-
-
-@api_bp.route('/servers', methods=['GET'])
-@apikey_auth
-@apikey_is_admin
-def api_server_forward():
-    resp = helper.forward_request()
-    return resp.content, resp.status_code, resp.headers.items()
-
 
 @api_bp.route('/servers/<path:subpath>', methods=['GET', 'PUT'])
 @apikey_auth
@@ -945,12 +1021,6 @@ def api_create_zone(server_id):
         current_app.logger.debug("Request to powerdns API successful")
         data = request.get_json(force=True)
 
-        history = History(msg='Add domain {0}'.format(
-            data['name'].rstrip('.')),
-                          detail=json.dumps(data),
-                          created_by=g.apikey.description)
-        history.add()
-
         if g.apikey.role.name not in ['Administrator', 'Operator']:
             current_app.logger.debug(
                 "Apikey is user key, assigning created domain")
@@ -959,6 +1029,13 @@ def api_create_zone(server_id):
 
         domain = Domain()
         domain.update()
+
+        history = History(msg='Add domain {0}'.format(
+            data['name'].rstrip('.')),
+            detail=json.dumps(data),
+            created_by=g.apikey.description,
+            domain_id=domain.get_id_by_name(data['name'].rstrip('.')))
+        history.add()
 
     return resp.content, resp.status_code, resp.headers.items()
 
@@ -971,15 +1048,35 @@ def api_get_zones(server_id):
             domain_obj_list = g.apikey.domains
         else:
             domain_obj_list = Domain.query.all()
-        return json.dumps(domain_schema.dump(domain_obj_list)), 200
+        return jsonify(domain_schema.dump(domain_obj_list)), 200
     else:
         resp = helper.forward_request()
-        return resp.content, resp.status_code, resp.headers.items()
+        if (g.apikey.role.name not in ['Administrator', 'Operator']
+            and resp.status_code == 200):
+            domain_list = [d['name']
+                           for d in domain_schema.dump(g.apikey.domains)]
+            content = json.dumps([i for i in json.loads(resp.content)
+                                  if i['name'].rstrip('.') in domain_list])
+            return content, resp.status_code, resp.headers.items()
+        else:
+            return resp.content, resp.status_code, resp.headers.items()
 
+
+@api_bp.route('/servers', methods=['GET'])
+@apikey_auth
+def api_server_forward():
+    resp = helper.forward_request()
+    return resp.content, resp.status_code, resp.headers.items()
+
+@api_bp.route('/servers/<string:server_id>', methods=['GET'])
+@apikey_auth
+def api_server_config_forward(server_id):
+    resp = helper.forward_request()
+    return resp.content, resp.status_code, resp.headers.items()
 
 # The endpoint to snychronize Domains in background
 @api_bp.route('/sync_domains', methods=['GET'])
-@apikey_auth
+@apikey_or_basic_auth
 def sync_domains():
     domain = Domain()
     domain.update()

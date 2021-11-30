@@ -8,7 +8,6 @@ from .models import User, ApiKey, Setting, Domain, Setting
 from .lib.errors import RequestIsNotJSON, NotEnoughPrivileges
 from .lib.errors import DomainAccessForbidden
 
-
 def admin_role_required(f):
     """
     Grant access if user is in Administrator role
@@ -29,6 +28,21 @@ def operator_role_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if current_user.role.name not in ['Administrator', 'Operator']:
+            abort(403)
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def history_access_required(f):
+    """
+    Grant access if user is in Operator role or higher, or Users can view history
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if current_user.role.name not in [
+            'Administrator', 'Operator'
+        ] and not Setting().get('allow_user_view_history'):
             abort(403)
         return f(*args, **kwargs)
 
@@ -78,6 +92,23 @@ def can_configure_dnssec(f):
         return f(*args, **kwargs)
 
     return decorated_function
+
+def can_remove_domain(f):
+    """
+    Grant access if:
+        - user is in Operator role or higher, or
+        - allow_user_remove_domain is on
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if current_user.role.name not in [
+                'Administrator', 'Operator'
+        ] and not Setting().get('allow_user_remove_domain'):
+            abort(403)
+        return f(*args, **kwargs)
+
+    return decorated_function
+
 
 
 def can_create_domain(f):
@@ -236,7 +267,7 @@ def apikey_can_access_domain(f):
         apikey = g.apikey
         if g.apikey.role.name not in ['Administrator', 'Operator']:
             domains = apikey.domains
-            zone_id = kwargs.get('zone_id')
+            zone_id = kwargs.get('zone_id').rstrip(".")
             domain_names = [item.name for item in domains]
 
             if zone_id not in domain_names:
@@ -290,4 +321,14 @@ def dyndns_login_required(f):
             return render_template('dyndns.html', response='badauth'), 200
         return f(*args, **kwargs)
 
+    return decorated_function
+
+def apikey_or_basic_auth(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        api_auth_header = request.headers.get('X-API-KEY')
+        if api_auth_header:
+            return apikey_auth(f)(*args, **kwargs)
+        else:
+            return api_basic_auth(f)(*args, **kwargs)
     return decorated_function

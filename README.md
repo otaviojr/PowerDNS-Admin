@@ -1,7 +1,6 @@
 # PowerDNS-Admin
 A PowerDNS web interface with advanced features.
 
-[![Build Status](https://travis-ci.org/ngoduykhanh/PowerDNS-Admin.svg?branch=master)](https://travis-ci.org/ngoduykhanh/PowerDNS-Admin)
 [![Language grade: Python](https://img.shields.io/lgtm/grade/python/g/ngoduykhanh/PowerDNS-Admin.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/ngoduykhanh/PowerDNS-Admin/context:python)
 [![Language grade: JavaScript](https://img.shields.io/lgtm/grade/javascript/g/ngoduykhanh/PowerDNS-Admin.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/ngoduykhanh/PowerDNS-Admin/context:javascript)
 
@@ -18,6 +17,7 @@ A PowerDNS web interface with advanced features.
 - DynDNS 2 protocol support
 - Edit IPv6 PTRs using IPv6 addresses directly (no more editing of literal addresses!)
 - Limited API for manipulating zones and records
+- Full IDN/Punycode support
 
 ## Running PowerDNS-Admin
 There are several ways to run PowerDNS-Admin. The easiest way is to use Docker.
@@ -31,6 +31,7 @@ To get started as quickly as possible try option 1. If you want to make modifica
 The easiest is to just run the latest Docker image from Docker Hub:
 ```
 $ docker run -d \
+    -e SECRET_KEY='a-very-secret-key' \
     -v pda-data:/data \
     -p 9191:80 \
     ngoduykhanh/powerdns-admin:latest
@@ -38,10 +39,11 @@ $ docker run -d \
 This creates a volume called `pda-data` to persist the SQLite database with the configuration.
 
 #### Option 2: Using docker-compose
-1. Update the configuration
+1. Update the configuration   
    Edit the `docker-compose.yml` file to update the database connection string in `SQLALCHEMY_DATABASE_URI`.
    Other environment variables are mentioned in the [legal_envvars](https://github.com/ngoduykhanh/PowerDNS-Admin/blob/master/configs/docker_config.py#L5-L46).
-   To use the Docker secrets feature it is possible to append `_FILE` to the environment variables and point to a file with the values stored in it.
+   To use the Docker secrets feature it is possible to append `_FILE` to the environment variables and point to a file with the values stored in it.   
+   Make sure to set the environment variable `SECRET_KEY` to a long random string (https://flask.palletsprojects.com/en/1.1.x/config/#SECRET_KEY)
 
 2. Start docker container
    ```

@@ -5,9 +5,13 @@ import bcrypt
 import pyotp
 import ldap
 import ldap.filter
+from collections import OrderedDict
 from flask import current_app
 from flask_login import AnonymousUserMixin
 from sqlalchemy import orm
+import qrcode as qrc
+import qrcode.image.svg as qrc_svg
+from io import BytesIO
 
 from .base import db
 from .role import Role
@@ -31,6 +35,7 @@ class User(db.Model):
     otp_secret = db.Column(db.String(16))
     confirmed = db.Column(db.SmallInteger, nullable=False, default=0)
     role_id = db.Column(db.Integer, db.ForeignKey('role.id'))
+    role = db.relationship('Role', back_populates="users", lazy=True)
     accounts = None
 
     def __init__(self,
@@ -80,21 +85,18 @@ class User(db.Model):
         return False
 
     def get_id(self):
-        try:
-            return unicode(self.id)  # python 2
-        except NameError:
-            return str(self.id)  # python 3
+        return str(self.id)
 
     def __repr__(self):
         return '<User {0}>'.format(self.username)
 
     def get_totp_uri(self):
-        return "otpauth://totp/PowerDNS-Admin:{0}?secret={1}&issuer=PowerDNS-Admin".format(
-            self.username, self.otp_secret)
+        return "otpauth://totp/{0}:{1}?secret={2}&issuer=PowerDNS-Admin".format(
+            Setting().get('site_name'), self.username, self.otp_secret)
 
     def verify_totp(self, token):
         totp = pyotp.TOTP(self.otp_secret)
-        return totp.verify(token)
+        return totp.verify(token, valid_window = 5)
 
     def get_hashed_password(self, plain_text_password=None):
         # Hash a password for the first time
@@ -107,9 +109,10 @@ class User(db.Model):
 
     def check_password(self, hashed_password):
         # Check hashed password. Using bcrypt, the salt is saved into the hash itself
-        if (self.plain_text_password):
-            return bcrypt.checkpw(self.plain_text_password.encode('utf-8'),
-                                  hashed_password.encode('utf-8'))
+        if hasattr(self, "plain_text_password"):
+            if self.plain_text_password != None:
+                return bcrypt.checkpw(self.plain_text_password.encode('utf-8'),
+                                     hashed_password.encode('utf-8'))
         return False
 
     def get_user_info_by_id(self):
@@ -125,11 +128,20 @@ class User(db.Model):
         conn = ldap.initialize(Setting().get('ldap_uri'))
         conn.set_option(ldap.OPT_REFERRALS, ldap.OPT_OFF)
         conn.set_option(ldap.OPT_PROTOCOL_VERSION, 3)
-        conn.set_option(ldap.OPT_X_TLS, ldap.OPT_X_TLS_DEMAND)
         conn.set_option(ldap.OPT_X_TLS_DEMAND, True)
         conn.set_option(ldap.OPT_DEBUG_LEVEL, 255)
         conn.protocol_version = ldap.VERSION3
         return conn
+
+    def escape_filter_chars(self, filter_str):
+        """
+        Escape chars for ldap search
+        """
+        escape_chars = ['\\', '*', '(', ')', '\x00']
+        replace_chars = ['\\5c', '\\2a', '\\28', '\\29', '\\00']
+        for escape_char in escape_chars:
+            filter_str = filter_str.replace(escape_char, replace_chars[escape_chars.index(escape_char)])
+        return filter_str
 
     def ldap_search(self, searchFilter, baseDN, retrieveAttributes=None):
         searchScope = ldap.SCOPE_SUBTREE
@@ -170,28 +182,6 @@ class User(db.Model):
         except ldap.LDAPError as e:
             current_app.logger.error(e)
             return False
-
-    def ad_recursive_groups(self, groupDN):
-        """
-        Recursively list groups belonging to a group. It will allow checking deep in the Active Directory
-        whether a user is allowed to enter or not
-        """
-        LDAP_BASE_DN = Setting().get('ldap_base_dn')
-        groupSearchFilter = "(&(objectcategory=group)(member=%s))" % ldap.filter.escape_filter_chars(
-            groupDN)
-        result = [groupDN]
-        try:
-            groups = self.ldap_search(groupSearchFilter, LDAP_BASE_DN)
-            for group in groups:
-                result += [group[0][0]]
-                if 'memberOf' in group[0][1]:
-                    for member in group[0][1]['memberOf']:
-                        result += self.ad_recursive_groups(
-                            member.decode("utf-8"))
-            return result
-        except ldap.LDAPError as e:
-            current_app.logger.exception("Recursive AD Group search error")
-            return result
 
     def is_validate(self, method, src_ip='', trust_user=False):
         """
@@ -275,77 +265,82 @@ class User(db.Model):
                             if LDAP_TYPE == 'ldap':
                                 groupSearchFilter = "(&({0}={1}){2})".format(LDAP_FILTER_GROUPNAME, ldap_username, LDAP_FILTER_GROUP)
                                 current_app.logger.debug('Ldap groupSearchFilter {0}'.format(groupSearchFilter))
-                                if (self.ldap_search(groupSearchFilter,
-                                                     LDAP_ADMIN_GROUP)):
+                                if (LDAP_ADMIN_GROUP and self.ldap_search(groupSearchFilter, LDAP_ADMIN_GROUP)):
                                     role_name = 'Administrator'
                                     current_app.logger.info(
                                         'User {0} is part of the "{1}" group that allows admin access to PowerDNS-Admin'
-                                        .format(self.username,
-                                                LDAP_ADMIN_GROUP))
-                                elif (self.ldap_search(groupSearchFilter,
-                                                       LDAP_OPERATOR_GROUP)):
+                                        .format(self.username, LDAP_ADMIN_GROUP))
+                                elif (LDAP_OPERATOR_GROUP and self.ldap_search(groupSearchFilter, LDAP_OPERATOR_GROUP)):
                                     role_name = 'Operator'
                                     current_app.logger.info(
                                         'User {0} is part of the "{1}" group that allows operator access to PowerDNS-Admin'
-                                        .format(self.username,
-                                                LDAP_OPERATOR_GROUP))
-                                elif (self.ldap_search(groupSearchFilter,
-                                                       LDAP_USER_GROUP)):
+                                        .format(self.username, LDAP_OPERATOR_GROUP))
+                                elif (LDAP_USER_GROUP and self.ldap_search(groupSearchFilter, LDAP_USER_GROUP)):
                                     current_app.logger.info(
                                         'User {0} is part of the "{1}" group that allows user access to PowerDNS-Admin'
-                                        .format(self.username,
-                                                LDAP_USER_GROUP))
+                                        .format(self.username, LDAP_USER_GROUP))
                                 else:
                                     current_app.logger.error(
-                                        'User {0} is not part of the "{1}", "{2}" or "{3}" groups that allow access to PowerDNS-Admin'
-                                        .format(self.username,
-                                                LDAP_ADMIN_GROUP,
-                                                LDAP_OPERATOR_GROUP,
-                                                LDAP_USER_GROUP))
-                                    return False
-                            elif LDAP_TYPE == 'ad':
-                                user_ldap_groups = []
-                                user_ad_member_of = ldap_result[0][0][1].get(
-                                    'memberOf')
-
-                                if not user_ad_member_of:
-                                    current_app.logger.error(
-                                        'User {0} does not belong to any group while LDAP_GROUP_SECURITY_ENABLED is ON'
+                                        'User {0} is not part of any security groups that allow access to PowerDNS-Admin'
                                         .format(self.username))
                                     return False
+                            elif LDAP_TYPE == 'ad':
+                                ldap_group_security_roles = OrderedDict(
+                                    Administrator=LDAP_ADMIN_GROUP,
+                                    Operator=LDAP_OPERATOR_GROUP,
+                                    User=LDAP_USER_GROUP,
+                                )
+                                user_dn = self.escape_filter_chars(ldap_result[0][0][0])
+                                sf_groups = ""
 
-                                for group in [
-                                        g.decode("utf-8")
-                                        for g in user_ad_member_of
-                                ]:
-                                    user_ldap_groups += self.ad_recursive_groups(
-                                        group)
+                                for group in ldap_group_security_roles.values():
+                                    if not group:
+                                        continue
 
-                                if (LDAP_ADMIN_GROUP in user_ldap_groups):
-                                    role_name = 'Administrator'
-                                    current_app.logger.info(
-                                        'User {0} is part of the "{1}" group that allows admin access to PowerDNS-Admin'
-                                        .format(self.username,
-                                                LDAP_ADMIN_GROUP))
-                                elif (LDAP_OPERATOR_GROUP in user_ldap_groups):
-                                    role_name = 'Operator'
-                                    current_app.logger.info(
-                                        'User {0} is part of the "{1}" group that allows operator access to PowerDNS-Admin'
-                                        .format(self.username,
-                                                LDAP_OPERATOR_GROUP))
-                                elif (LDAP_USER_GROUP in user_ldap_groups):
-                                    current_app.logger.info(
-                                        'User {0} is part of the "{1}" group that allows user access to PowerDNS-Admin'
-                                        .format(self.username,
-                                                LDAP_USER_GROUP))
-                                else:
+                                    sf_groups += f"(distinguishedName={group})"
+
+                                sf_member_user = f"(member:1.2.840.113556.1.4.1941:={user_dn})"
+                                search_filter = f"(&(|{sf_groups}){sf_member_user})"
+                                current_app.logger.debug(f"LDAP groupSearchFilter '{search_filter}'")
+
+                                ldap_user_groups = [
+                                    group[0][0]
+                                    for group in self.ldap_search(
+                                        search_filter,
+                                        LDAP_BASE_DN
+                                    )
+                                ]
+
+                                if not ldap_user_groups:
                                     current_app.logger.error(
-                                        'User {0} is not part of the "{1}", "{2}" or "{3}" groups that allow access to PowerDNS-Admin'
-                                        .format(self.username,
-                                                LDAP_ADMIN_GROUP,
-                                                LDAP_OPERATOR_GROUP,
-                                                LDAP_USER_GROUP))
+                                        f"User '{self.username}' "
+                                        "does not belong to any group "
+                                        "while LDAP_GROUP_SECURITY_ENABLED is ON"
+                                    )
                                     return False
+
+                                current_app.logger.debug(
+                                    "LDAP User security groups "
+                                    f"for user '{self.username}': "
+                                    " ".join(ldap_user_groups)
+                                )
+
+                                for role, ldap_group in ldap_group_security_roles.items():
+                                    # Continue when groups is not defined or
+                                    # user is'nt member of LDAP group
+                                    if not ldap_group or not ldap_group in ldap_user_groups:
+                                        continue
+
+                                    role_name = role
+                                    current_app.logger.info(
+                                        f"User '{self.username}' member of "
+                                        f"the '{ldap_group}' group that allows "
+                                        f"'{role}' access to to PowerDNS-Admin"
+                                    )
+
+                                    # Stop loop on first found
+                                    break
+
                             else:
                                 current_app.logger.error('Invalid LDAP type')
                                 return False
@@ -423,12 +418,12 @@ class User(db.Model):
         Create local user witch stores username / password in the DB
         """
         # check if username existed
-        user = User.query.filter(User.username == self.username).first()
+        user = User.query.filter(str(User.username).lower() == self.username.lower()).first()
         if user:
             return {'status': False, 'msg': 'Username is already in use'}
 
         # check if email existed
-        user = User.query.filter(User.email == self.email).first()
+        user = User.query.filter(str(User.email).lower() == self.email.lower()).first()
         if user:
             return {'status': False, 'msg': 'Email address is already in use'}
 
@@ -439,8 +434,12 @@ class User(db.Model):
             self.role_id = Role.query.filter_by(
                 name='Administrator').first().id
 
-        self.password = self.get_hashed_password(
-            self.plain_text_password) if self.plain_text_password else '*'
+        if hasattr(self, "plain_text_password"):
+            if self.plain_text_password != None:
+                self.password = self.get_hashed_password(
+                    self.plain_text_password)
+        else:
+            self.password = '*'
 
         if self.password and self.password != '*':
             self.password = self.password.decode("utf-8")
@@ -476,9 +475,10 @@ class User(db.Model):
         user.email = self.email
 
         # store new password hash (only if changed)
-        if self.plain_text_password:
-            user.password = self.get_hashed_password(
-                self.plain_text_password).decode("utf-8")
+        if hasattr(self, "plain_text_password"):
+            if self.plain_text_password != None:
+                user.password = self.get_hashed_password(
+                    self.plain_text_password).decode("utf-8")
 
         db.session.commit()
         return {'status': True, 'msg': 'User updated successfully'}
@@ -493,9 +493,11 @@ class User(db.Model):
 
         user.firstname = self.firstname if self.firstname else user.firstname
         user.lastname = self.lastname if self.lastname else user.lastname
-        user.password = self.get_hashed_password(
-            self.plain_text_password).decode(
-                "utf-8") if self.plain_text_password else user.password
+
+        if hasattr(self, "plain_text_password"):
+            if self.plain_text_password != None:
+                user.password = self.get_hashed_password(
+                 self.plain_text_password).decode("utf-8")
 
         if self.email:
             # Can not update to a new email that
@@ -536,7 +538,7 @@ class User(db.Model):
 
     def get_domains(self):
         """
-        Get list of domains which the user is granted to have
+        Get list of zones which the user is granted to have
         access.
 
         Note: This doesn't include the permission granting from Account
@@ -628,10 +630,18 @@ class User(db.Model):
                 Account)\
             .filter(self.id == AccountUser.user_id)\
             .filter(Account.id == AccountUser.account_id)\
+            .order_by(Account.name)\
             .all()
         for q in query:
             accounts.append(q[1])
         return accounts
+
+    def get_qrcode_value(self):
+        img = qrc.make(self.get_totp_uri(),
+                    image_factory=qrc_svg.SvgPathImage)
+        stream = BytesIO()
+        img.save(stream)
+        return stream.getvalue()
 
 
     def read_entitlements(self, key):
@@ -681,7 +691,7 @@ class User(db.Model):
 
     def addMissingDomain(self, autoprovision_domain, current_domains):
         """
-        Add domain gathered by autoprovisioning to the current domains list of a user
+        Add domain gathered by autoprovisioning to the current zones list of a user
         """
         from ..models.domain import Domain
         user = db.session.query(User).filter(User.username == self.username).first()
@@ -786,14 +796,11 @@ def get_role_names(roles):
     """
     roles_list=[]
     for role in roles:
-        roles_list.append(role.name) 
+        roles_list.append(role.name)
     return roles_list
-    
+
 def getUserInfo(DomainsOrAccounts):
     current=[]
     for DomainOrAccount in DomainsOrAccounts:
         current.append(DomainOrAccount.name)
     return current
-
-        
-

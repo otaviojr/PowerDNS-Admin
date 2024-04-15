@@ -21,7 +21,7 @@ class StructuredException(Exception):
 class DomainNotExists(StructuredException):
     status_code = 404
 
-    def __init__(self, name=None, message="Domain does not exist"):
+    def __init__(self, name=None, message="Zone does not exist"):
         StructuredException.__init__(self)
         self.message = message
         self.name = name
@@ -30,7 +30,7 @@ class DomainNotExists(StructuredException):
 class DomainAlreadyExists(StructuredException):
     status_code = 409
 
-    def __init__(self, name=None, message="Domain already exists"):
+    def __init__(self, name=None, message="Zone already exists"):
         StructuredException.__init__(self)
         self.message = message
         self.name = name
@@ -39,11 +39,18 @@ class DomainAlreadyExists(StructuredException):
 class DomainAccessForbidden(StructuredException):
     status_code = 403
 
-    def __init__(self, name=None, message="Domain access not allowed"):
+    def __init__(self, name=None, message="Zone access not allowed"):
         StructuredException.__init__(self)
         self.message = message
         self.name = name
 
+class DomainOverrideForbidden(StructuredException):
+    status_code = 409
+
+    def __init__(self, name=None, message="Zone override of record not allowed"):
+        StructuredException.__init__(self)
+        self.message = message
+        self.name = name
 
 class ApiKeyCreateFail(StructuredException):
     status_code = 500
@@ -60,7 +67,8 @@ class ApiKeyNotUsable(StructuredException):
     def __init__(
         self,
         name=None,
-        message="Api key must have domains or have administrative role"):
+        message=("Api key must have zones or accounts"
+                 " or an administrative role")):
         StructuredException.__init__(self)
         self.message = message
         self.name = name
@@ -93,6 +101,15 @@ class AccountCreateFail(StructuredException):
         self.name = name
 
 
+class AccountCreateDuplicate(StructuredException):
+    status_code = 409
+
+    def __init__(self, name=None, message="Creation of account failed"):
+        StructuredException.__init__(self)
+        self.message = message
+        self.name = name
+
+
 class AccountUpdateFail(StructuredException):
     status_code = 500
 
@@ -111,6 +128,22 @@ class AccountDeleteFail(StructuredException):
         self.name = name
 
 
+class AccountNotExists(StructuredException):
+    status_code = 404
+
+    def __init__(self, name=None, message="Account does not exist"):
+        StructuredException.__init__(self)
+        self.message = message
+        self.name = name
+
+class InvalidAccountNameException(StructuredException):
+    status_code = 400
+
+    def __init__(self, name=None, message="The account name is invalid"):
+        StructuredException.__init__(self)
+        self.message = message
+        self.name = name
+
 class UserCreateFail(StructuredException):
     status_code = 500
 
@@ -119,6 +152,13 @@ class UserCreateFail(StructuredException):
         self.message = message
         self.name = name
 
+class UserCreateDuplicate(StructuredException):
+    status_code = 409
+
+    def __init__(self, name=None, message="Creation of user failed"):
+        StructuredException.__init__(self)
+        self.message = message
+        self.name = name
 
 class UserUpdateFail(StructuredException):
     status_code = 500
@@ -128,11 +168,34 @@ class UserUpdateFail(StructuredException):
         self.message = message
         self.name = name
 
+class UserUpdateFailEmail(StructuredException):
+    status_code = 409
+
+    def __init__(self, name=None, message="Update of user failed"):
+        StructuredException.__init__(self)
+        self.message = message
+        self.name = name
 
 class UserDeleteFail(StructuredException):
     status_code = 500
 
     def __init__(self, name=None, message="Delete of user failed"):
+        StructuredException.__init__(self)
+        self.message = message
+        self.name = name
+
+class RecordTypeNotAllowed(StructuredException):
+    status_code = 400
+
+    def __init__(self, name=None, message="Record type not allowed or does not present"):
+        StructuredException.__init__(self)
+        self.message = message
+        self.name = name
+
+class RecordTTLNotAllowed(StructuredException):
+    status_code = 400
+
+    def __init__(self, name=None, message="Record TTL not allowed or does not present"):
         StructuredException.__init__(self)
         self.message = message
         self.name = name

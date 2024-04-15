@@ -72,8 +72,9 @@ class SAML(object):
     def prepare_flask_request(self, request):
         # If server is behind proxys or balancers use the HTTP_X_FORWARDED fields
         url_data = urlparse(request.url)
+        proto = request.headers.get('HTTP_X_FORWARDED_PROTO', request.scheme)
         return {
-            'https': 'on' if request.scheme == 'https' else 'off',
+            'https': 'on' if proto == 'https' else 'off',
             'http_host': request.host,
             'server_port': url_data.port,
             'script_name': request.path,
@@ -104,10 +105,10 @@ class SAML(object):
         settings['sp']['entityId'] = current_app.config['SAML_SP_ENTITY_ID']
 
 
-        if ('SAML_CERT_FILE' in current_app.config) and ('SAML_KEY_FILE' in current_app.config):
+        if ('SAML_CERT' in current_app.config) and ('SAML_KEY' in current_app.config):
 
-             saml_cert_file = current_app.config['SAML_CERT_FILE']
-             saml_key_file = current_app.config['SAML_KEY_FILE']
+             saml_cert_file = current_app.config['SAML_CERT']
+             saml_key_file = current_app.config['SAML_KEY']
 
              if os.path.isfile(saml_cert_file):
                  cert = open(saml_cert_file, "r").readlines()
@@ -163,7 +164,8 @@ class SAML(object):
             'signatureAlgorithm'] = 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256'
         settings['security']['wantAssertionsEncrypted'] = current_app.config.get(
             'SAML_ASSERTION_ENCRYPTED', True)
-        settings['security']['wantAttributeStatement'] = True
+        settings['security']['wantAttributeStatement'] = current_app.config.get(
+            'SAML_WANT_ATTRIBUTE_STATEMENT', True)
         settings['security']['wantNameId'] = True
         settings['security']['authnRequestsSigned'] = current_app.config[
             'SAML_SIGN_REQUEST']

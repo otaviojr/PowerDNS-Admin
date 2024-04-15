@@ -12,13 +12,7 @@ function applyChanges(data, url, showResult, refreshPage) {
             console.log("Applied changes successfully.");
             console.log(data);
             if (showResult) {
-                var modal = $("#modal_success");
-                if (data['msg']) {
-                    modal.find('.modal-body p').text(data['msg']);
-                } else {
-                    modal.find('.modal-body p').text("Applied changes successfully");
-                }
-                modal.modal('show');
+                showSuccessModal(data['msg'] || "Applied changes successfully");
             }
             if (refreshPage) {
                 location.reload(true);
@@ -27,10 +21,8 @@ function applyChanges(data, url, showResult, refreshPage) {
 
         error : function(jqXHR, status) {
             console.log(jqXHR);
-            var modal = $("#modal_error");
             var responseJson = jQuery.parseJSON(jqXHR.responseText);
-            modal.find('.modal-body p').text(responseJson['msg']);
-            modal.modal('show');
+            showErrorModal(responseJson['msg']);
         }
     });
 }
@@ -38,29 +30,26 @@ function applyChanges(data, url, showResult, refreshPage) {
 function applyRecordChanges(data, domain) {
     $.ajax({
         type : "POST",
-        url : $SCRIPT_ROOT + '/domain/' + domain + '/apply',
+        url : $SCRIPT_ROOT + '/domain/' + encodeURIComponent(domain) + '/apply',
         data : JSON.stringify(data),// now data come in this function
         contentType : "application/json; charset=utf-8",
         crossDomain : true,
         dataType : "json",
         success : function(data, status, jqXHR) {
             // update Apply button value
-            $.getJSON($SCRIPT_ROOT + '/domain/' + domain + '/info', function(data) {
+            $.getJSON($SCRIPT_ROOT + '/domain/' + encodeURIComponent(domain) + '/info', function(data) {
                 $(".button_apply_changes").val(data['serial']);
             });
 
             console.log("Applied changes successfully.")
-            var modal = $("#modal_success");
-            modal.find('.modal-body p').text("Applied changes successfully");
-            modal.modal('show');
+            showSuccessModal("Applied changes successfully");
+            setTimeout(() => {window.location.reload()}, 2000);
         },
 
         error : function(jqXHR, status) {
             console.log(jqXHR);
-            var modal = $("#modal_error");
             var responseJson = jQuery.parseJSON(jqXHR.responseText);
-            modal.find('.modal-body p').text(responseJson['msg']);
-            modal.modal('show');
+            showErrorModal(responseJson['msg']);
         }
     });
 }
@@ -75,11 +64,15 @@ function getTableData(table) {
         record["record_type"] = r[1].trim();
         record["record_status"] = r[2].trim();
         record["record_ttl"] = r[3].trim();
-        record["record_data"] = r[4].trim();
-        record["record_comment"] = r[5].trim();
+        record["record_data"] = convertHTMLEntityToText(r[4].trim());
+        record["record_comment"] = convertHTMLEntityToText(r[5].trim());
         records.push(record);
     });
     return records
+}
+
+function convertHTMLEntityToText(htmlEntity) {
+    return $('<textarea />').html(htmlEntity).text();
 }
 
 function saveRow(oTable, nRow) {
@@ -100,8 +93,8 @@ function saveRow(oTable, nRow) {
     oTable.cell(nRow,5).data(jqInputs[2].value);
 
     var record = jqInputs[0].value;
-    var button_edit = "<button type=\"button\" class=\"btn btn-flat btn-warning button_edit\" id=\"" + record +  "\">Edit&nbsp;<i class=\"fa fa-edit\"></i></button>"
-    var button_delete = "<button type=\"button\" class=\"btn btn-flat btn-danger button_delete\" id=\"" + record +  "\">Delete&nbsp;<i class=\"fa fa-trash\"></i></button>"
+    var button_edit = "<button type=\"button\" class=\"btn btn-warning button_edit\" id=\"" + record +  "\">Edit&nbsp;<i class=\"fa fa-edit\"></i></button>"
+    var button_delete = "<button type=\"button\" class=\"btn btn-danger button_delete\" id=\"" + record +  "\">Delete&nbsp;<i class=\"fa fa-trash\"></i></button>"
 
     oTable.cell(nRow,6).data(button_edit);
     oTable.cell(nRow,7).data(button_delete);
@@ -149,8 +142,8 @@ function editRow(oTable, nRow) {
     jqTds[3].innerHTML = '<select class="form-control" id="record_ttl" name="record_ttl" value="' + aData[3]  + '">' + ttl_opts + '</select>';
     jqTds[4].innerHTML = '<input type="text" style="display:table-cell; width:100% !important" id="current_edit_record_data" name="current_edit_record_data" class="form-control input-small advance-data" value="' + aData[4].replace(/\"/g,"&quot;") + '">';
     jqTds[5].innerHTML = '<input type="text" style="display:table-cell; width:100% !important" id="record_comment" name="record_comment" class="form-control input-small advance-data" value="' + aData[5].replace(/\"/g, "&quot;") + '">';
-    jqTds[6].innerHTML = '<button type="button" class="btn btn-flat btn-primary button_save">Save</button>';
-    jqTds[7].innerHTML = '<button type="button" class="btn btn-flat btn-primary button_cancel">Cancel</button>';
+    jqTds[6].innerHTML = '<button type="button" class="btn btn-primary button_save">Save</button>';
+    jqTds[7].innerHTML = '<button type="button" class="btn btn-primary button_cancel">Cancel</button>';
 
     // set current value of dropdown column
     if (aData[2] == 'Active'){
@@ -199,12 +192,12 @@ function getdnssec(url, domain){
             if (dnssec.length == 0 && parseFloat(PDNS_VERSION) >= 4.1) {
               dnssec_msg = '<h3>DNSSEC is disabled. Click on Enable to activate it.';
               modal.find('.modal-body p').html(dnssec_msg);
-              dnssec_footer = '<button type="button" class="btn btn-flat btn-success button_dnssec_enable pull-left" id="'+domain+'">Enable</button><button type="button" class="btn btn-flat btn-default pull-right" data-dismiss="modal">Cancel</button>';
+              dnssec_footer = '<button type="button" class="btn btn-success button_dnssec_enable pull-left" id="'+domain+'">Enable</button><button type="button" class="btn btn-default pull-right" data-dismiss="modal">Cancel</button>';
               modal.find('.modal-footer ').html(dnssec_footer);
             }
             else {
                 if (parseFloat(PDNS_VERSION) >= 4.1) {
-                  dnssec_footer = '<button type="button" class="btn btn-flat btn-danger button_dnssec_disable pull-left" id="'+domain+'">Disable DNSSEC</button><button type="button" class="btn btn-flat btn-default pull-right" data-dismiss="modal">Close</button>';
+                  dnssec_footer = '<button type="button" class="btn btn-danger button_dnssec_disable pull-left" id="'+domain+'">Disable DNSSEC</button><button type="button" class="btn btn-default pull-right" data-dismiss="modal">Close</button>';
                   modal.find('.modal-footer ').html(dnssec_footer);
                 }
                 for (var i = 0; i < dnssec.length; i++) {
@@ -285,3 +278,26 @@ function timer(elToUpdate, maxTime) {
 
     return interval;
 }
+
+// copy otp secret code to clipboard
+function copy_otp_secret_to_clipboard() {
+    var copyBox = document.getElementById("otp_secret");
+    copyBox.select();
+    copyBox.setSelectionRange(0, 99999); /* For mobile devices */
+    navigator.clipboard.writeText(copyBox.value);
+    $("#copy_tooltip").css("visibility", "visible");
+    setTimeout(function(){ $("#copy_tooltip").css("visibility", "collapse"); }, 2000);
+  }
+
+// Side menu nav bar active selection
+/** add active class and stay opened when selected */
+
+// for sidebar menu entirely but not cover treeview
+$('ul.nav-sidebar a').filter(function() {
+    return this.href == window.location.href.split('?')[0];
+}).addClass('active');
+
+// for treeview
+$('ul.nav-treeview a').filter(function() {
+    return this.href == window.location.href.split('?')[0];
+}).parentsUntil(".nav-sidebar > .nav-treeview").addClass('menu-open').prev('a').addClass('active');

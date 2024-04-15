@@ -46,7 +46,7 @@ class Record(object):
 
     def get_rrsets(self, domain):
         """
-        Query domain's rrsets via PDNS API
+        Query zone's rrsets via PDNS API
         """
         headers = {'X-API-Key': self.PDNS_API_KEY}
         try:
@@ -59,12 +59,15 @@ class Record(object):
                                      verify=Setting().get('verify_ssl_connections'))
         except Exception as e:
             current_app.logger.error(
-                "Cannot fetch domain's record data from remote powerdns api. DETAIL: {0}"
+                "Cannot fetch zone's record data from remote powerdns api. DETAIL: {0}"
                 .format(e))
             return []
 
         rrsets=[]
         for r in jdata['rrsets']:
+            if len(r['records']) == 0:
+                continue
+
             while len(r['comments'])<len(r['records']):
                 r['comments'].append({"content": "", "account": ""})
             r['records'], r['comments'] = (list(t) for t in zip(*sorted(zip(r['records'], r['comments']), key=by_record_content_pair)))
@@ -74,7 +77,7 @@ class Record(object):
 
     def add(self, domain_name, rrset):
         """
-        Add a record to a domain (Used by auto_ptr and DynDNS)
+        Add a record to a zone (Used by auto_ptr and DynDNS)
 
         Args:
             domain_name(str): The zone name
@@ -96,7 +99,7 @@ class Record(object):
                 }
 
         # Continue if the record is ready to be added
-        headers = {'X-API-Key': self.PDNS_API_KEY}
+        headers = {'X-API-Key': self.PDNS_API_KEY, 'Content-Type': 'application/json'}
 
         try:
             jdata = utils.fetch_json(urljoin(
@@ -112,7 +115,7 @@ class Record(object):
             return {'status': 'ok', 'msg': 'Record was added successfully'}
         except Exception as e:
             current_app.logger.error(
-                "Cannot add record to domain {}. Error: {}".format(
+                "Cannot add record to zone {}. Error: {}".format(
                     domain_name, e))
             current_app.logger.debug("Submitted record rrset: \n{}".format(
                 utils.pretty_json(rrset)))
@@ -162,6 +165,17 @@ class Record(object):
         for record in submitted_records:
             # Format the record name
             #
+            # Translate template placeholders into proper record data
+            record['record_data'] = record['record_data'].replace('[ZONE]', domain_name)
+            # Translate record name into punycode (IDN) as that's the only way
+            # to convey non-ascii records to the dns server
+            record['record_name'] = utils.to_idna(record["record_name"], "encode")
+            #TODO: error handling
+            # If the record is an alias (CNAME), we will also make sure that
+            # the target zone is properly converted to punycode (IDN)
+            if record['record_type'] == 'CNAME' or record['record_type'] == 'SOA':
+                record['record_data'] = utils.to_idna(record['record_data'], 'encode')
+                #TODO: error handling
             # If it is ipv6 reverse zone and PRETTY_IPV6_PTR is enabled,
             # We convert ipv6 address back to reverse record format
             # before submitting to PDNS API.
@@ -237,6 +251,7 @@ class Record(object):
         Returns:
             new_rrsets(list): List of rrsets to be added
             del_rrsets(list): List of rrsets to be deleted
+            zone_has_comments(bool): True if the zone currently contains persistent comments
         """
         # Create submitted rrsets from submitted records
         submitted_rrsets = self.build_rrsets(domain_name, submitted_records)
@@ -252,9 +267,11 @@ class Record(object):
         # PDNS API always return the comments with modified_at
         # info, we have to remove it to be able to do the dict
         # comparison between current and submitted rrsets
+        zone_has_comments = False
         for r in current_rrsets:
             for comment in r['comments']:
                 if 'modified_at' in comment:
+                    zone_has_comments = True
                     del comment['modified_at']
 
         # List of rrsets to be added
@@ -276,10 +293,10 @@ class Record(object):
         current_app.logger.debug("new_rrsets: \n{}".format(utils.pretty_json(new_rrsets)))
         current_app.logger.debug("del_rrsets: \n{}".format(utils.pretty_json(del_rrsets)))
 
-        return new_rrsets, del_rrsets
+        return new_rrsets, del_rrsets, zone_has_comments
 
     def apply_rrsets(self, domain_name, rrsets):
-        headers = {'X-API-Key': self.PDNS_API_KEY}
+        headers = {'X-API-Key': self.PDNS_API_KEY, 'Content-Type': 'application/json'}
         jdata = utils.fetch_json(urljoin(
             self.PDNS_STATS_URL, self.API_EXTENDED_URL +
             '/servers/localhost/zones/{0}'.format(domain_name)),
@@ -289,66 +306,77 @@ class Record(object):
                                   data=rrsets)
         return jdata
 
+    @staticmethod
+    def to_api_payload(new_rrsets, del_rrsets, comments_supported):
+        """Turn the given changes into a single api payload."""
+
+        def replace_for_api(rrset):
+            """Return a modified copy of the given RRset with changetype REPLACE."""
+            if not rrset or rrset.get('changetype', None) != 'REPLACE':
+                return rrset
+            replace_copy = dict(rrset)
+            has_nonempty_comments = any(bool(c.get('content', None)) for c in replace_copy.get('comments', []))
+            if not has_nonempty_comments:
+                if comments_supported:
+                    replace_copy['comments'] = []
+                else:
+                    # For backends that don't support comments: Remove the attribute altogether
+                    replace_copy.pop('comments', None)
+            return replace_copy
+
+        def rrset_in(needle, haystack):
+            """Return whether the given RRset (identified by name and type) is in the list."""
+            for hay in haystack:
+                if needle['name'] == hay['name'] and needle['type'] == hay['type']:
+                    return True
+            return False
+
+        def delete_for_api(rrset):
+            """Return a minified copy of the given RRset with changetype DELETE."""
+            if not rrset or rrset.get('changetype', None) != 'DELETE':
+                return rrset
+            delete_copy = dict(rrset)
+            delete_copy.pop('ttl', None)
+            delete_copy.pop('records', None)
+            delete_copy.pop('comments', None)
+            return delete_copy
+
+        replaces = [replace_for_api(r) for r in new_rrsets]
+        deletes = [delete_for_api(r) for r in del_rrsets if not rrset_in(r, replaces)]
+        return {
+            # order matters: first deletions, then additions+changes
+            'rrsets': deletes + replaces
+        }
+
     def apply(self, domain_name, submitted_records):
         """
-        Apply record changes to a domain. This function
-        will make 2 calls to the PDNS API to DELETE and
+        Apply record changes to a zone. This function
+        will make 1 call to the PDNS API to DELETE and
         REPLACE records (rrsets)
         """
         current_app.logger.debug(
             "submitted_records: {}".format(submitted_records))
 
         # Get the list of rrsets to be added and deleted
-        new_rrsets, del_rrsets = self.compare(domain_name, submitted_records)
+        new_rrsets, del_rrsets, zone_has_comments = self.compare(domain_name, submitted_records)
 
-        # Remove blank comments from rrsets for compatibility with some backends
-        for r in new_rrsets['rrsets']:
-            if not r['comments']:
-                del r['comments']
-
-        for r in del_rrsets['rrsets']:
-            if not r['comments']:
-                del r['comments']
+        # The history logic still needs *all* the deletes with full data to display a useful diff.
+        # So create a "minified" copy for the api call, and return the original data back up
+        api_payload = self.to_api_payload(new_rrsets['rrsets'], del_rrsets['rrsets'], zone_has_comments)
+        current_app.logger.debug(f"api payload: \n{utils.pretty_json(api_payload)}")
 
         # Submit the changes to PDNS API
         try:
-            if del_rrsets["rrsets"]:
-                result = self.apply_rrsets(domain_name, del_rrsets)
+            if api_payload["rrsets"]:
+                result = self.apply_rrsets(domain_name, api_payload)
                 if 'error' in result.keys():
                     current_app.logger.error(
-                        'Cannot apply record changes with deleting rrsets step. PDNS error: {}'
+                        'Cannot apply record changes. PDNS error: {}'
                         .format(result['error']))
                     return {
                         'status': 'error',
                         'msg': result['error'].replace("'", "")
                     }
-
-            if new_rrsets["rrsets"]:
-                result = self.apply_rrsets(domain_name, new_rrsets)
-                if 'error' in result.keys():
-                    current_app.logger.error(
-                        'Cannot apply record changes with adding rrsets step. PDNS error: {}'
-                        .format(result['error']))
-
-                    # rollback - re-add the removed record if the adding operation is failed.
-                    if del_rrsets["rrsets"]:
-                        rollback_rrests = del_rrsets
-                        for r in del_rrsets["rrsets"]:
-                            r['changetype'] = 'REPLACE'
-                        rollback = self.apply_rrsets(domain_name, rollback_rrests)
-                        if 'error' in rollback.keys():
-                            return dict(status='error',
-                                        msg='Failed to apply changes. Cannot rollback previous failed operation: {}'
-                                        .format(rollback['error'].replace("'", "")))
-                        else:
-                            return dict(status='error',
-                                        msg='Failed to apply changes. Rolled back previous failed operation: {}'
-                                        .format(result['error'].replace("'", "")))
-                    else:
-                        return {
-                            'status': 'error',
-                            'msg': result['error'].replace("'", "")
-                        }
 
             self.auto_ptr(domain_name, new_rrsets, del_rrsets)
             self.update_db_serial(domain_name)
@@ -356,7 +384,7 @@ class Record(object):
             return {'status': 'ok', 'msg': 'Record was applied successfully', 'data': (new_rrsets, del_rrsets)}
         except Exception as e:
             current_app.logger.error(
-                "Cannot apply record changes to domain {0}. Error: {1}".format(
+                "Cannot apply record changes to zone {0}. Error: {1}".format(
                     domain_name, e))
             current_app.logger.debug(traceback.format_exc())
             return {
@@ -401,6 +429,25 @@ class Record(object):
                 ]
 
                 d = Domain()
+                for r in del_rrsets:
+                    for record in r['records']:
+                        # Format the reverse record name
+                        # It is the reverse of forward record's content.
+                        reverse_host_address = dns.reversename.from_address(
+                            record['content']).to_text()
+
+                        # Create the reverse domain name in PDNS
+                        domain_reverse_name = d.get_reverse_domain_name(
+                            reverse_host_address)
+                        d.create_reverse_domain(domain_name,
+                                                domain_reverse_name)
+
+                        # Delete the reverse zone
+                        self.name = reverse_host_address
+                        self.type = 'PTR'
+                        self.data = record['content']
+                        self.delete(domain_reverse_name)
+                
                 for r in new_rrsets:
                     for record in r['records']:
                         # Format the reverse record name
@@ -434,32 +481,13 @@ class Record(object):
                         # Format the rrset
                         rrset = {"rrsets": rrset_data}
                         self.add(domain_reverse_name, rrset)
-
-                for r in del_rrsets:
-                    for record in r['records']:
-                        # Format the reverse record name
-                        # It is the reverse of forward record's content.
-                        reverse_host_address = dns.reversename.from_address(
-                            record['content']).to_text()
-
-                        # Create the reverse domain name in PDNS
-                        domain_reverse_name = d.get_reverse_domain_name(
-                            reverse_host_address)
-                        d.create_reverse_domain(domain_name,
-                                                domain_reverse_name)
-
-                        # Delete the reverse zone
-                        self.name = reverse_host_address
-                        self.type = 'PTR'
-                        self.data = record['content']
-                        self.delete(domain_reverse_name)
                 return {
                     'status': 'ok',
                     'msg': 'Auto-PTR record was updated successfully'
                 }
             except Exception as e:
                 current_app.logger.error(
-                    "Cannot update auto-ptr record changes to domain {0}. Error: {1}"
+                    "Cannot update auto-ptr record changes to zone {0}. Error: {1}"
                     .format(domain_name, e))
                 current_app.logger.debug(traceback.format_exc())
                 return {
@@ -471,9 +499,9 @@ class Record(object):
 
     def delete(self, domain):
         """
-        Delete a record from domain
+        Delete a record from zone
         """
-        headers = {'X-API-Key': self.PDNS_API_KEY}
+        headers = {'X-API-Key': self.PDNS_API_KEY, 'Content-Type': 'application/json'}
         data = {
             "rrsets": [{
                 "name": self.name.rstrip('.') + '.',
@@ -496,7 +524,7 @@ class Record(object):
             return {'status': 'ok', 'msg': 'Record was removed successfully'}
         except Exception as e:
             current_app.logger.error(
-                "Cannot remove record {0}/{1}/{2} from domain {3}. DETAIL: {4}"
+                "Cannot remove record {0}/{1}/{2} from zone {3}. DETAIL: {4}"
                 .format(self.name, self.type, self.data, domain, e))
             return {
                 'status': 'error',
@@ -519,7 +547,7 @@ class Record(object):
 
     def exists(self, domain):
         """
-        Check if record is present within domain records, and if it's present set self to found record
+        Check if record is present within zone records, and if it's present set self to found record
         """
         rrsets = self.get_rrsets(domain)
         for r in rrsets:
@@ -535,7 +563,7 @@ class Record(object):
         """
         Update single record
         """
-        headers = {'X-API-Key': self.PDNS_API_KEY}
+        headers = {'X-API-Key': self.PDNS_API_KEY, 'Content-Type': 'application/json'}
 
         data = {
             "rrsets": [{
@@ -567,7 +595,7 @@ class Record(object):
             return {'status': 'ok', 'msg': 'Record was updated successfully'}
         except Exception as e:
             current_app.logger.error(
-                "Cannot add record {0}/{1}/{2} to domain {3}. DETAIL: {4}".
+                "Cannot add record {0}/{1}/{2} to zone {3}. DETAIL: {4}".
                 format(self.name, self.type, self.data, domain, e))
             return {
                 'status': 'error',
@@ -593,11 +621,11 @@ class Record(object):
             db.session.commit()
             return {
                 'status': True,
-                'msg': 'Synced local serial for domain name {0}'.format(domain)
+                'msg': 'Synced local serial for zone name {0}'.format(domain)
             }
         else:
             return {
                 'status': False,
                 'msg':
-                'Could not find domain name {0} in local db'.format(domain)
+                'Could not find zone name {0} in local db'.format(domain)
             }

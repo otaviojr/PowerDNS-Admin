@@ -1,14 +1,14 @@
 import os
 import logging
 from flask import Flask
-from flask_seasurf import SeaSurf
 from flask_mail import Mail
 from werkzeug.middleware.proxy_fix import ProxyFix
-
+from flask_session import Session
 from .lib import utils
 
 
 def create_app(config=None):
+    from powerdnsadmin.lib.settings import AppSettings
     from . import models, routes, services
     from .assets import assets
     app = Flask(__name__)
@@ -32,29 +32,6 @@ def create_app(config=None):
     # Proxy
     app.wsgi_app = ProxyFix(app.wsgi_app)
 
-    # CSRF protection
-    csrf = SeaSurf(app)
-    csrf.exempt(routes.index.dyndns_checkip)
-    csrf.exempt(routes.index.dyndns_update)
-    csrf.exempt(routes.index.saml_authorized)
-    csrf.exempt(routes.api.api_login_create_zone)
-    csrf.exempt(routes.api.api_login_delete_zone)
-    csrf.exempt(routes.api.api_generate_apikey)
-    csrf.exempt(routes.api.api_delete_apikey)
-    csrf.exempt(routes.api.api_update_apikey)
-    csrf.exempt(routes.api.api_zone_subpath_forward)
-    csrf.exempt(routes.api.api_zone_forward)
-    csrf.exempt(routes.api.api_create_zone)
-    csrf.exempt(routes.api.api_create_account)
-    csrf.exempt(routes.api.api_delete_account)
-    csrf.exempt(routes.api.api_update_account)
-    csrf.exempt(routes.api.api_create_user)
-    csrf.exempt(routes.api.api_delete_user)
-    csrf.exempt(routes.api.api_update_user)
-    csrf.exempt(routes.api.api_list_account_users)
-    csrf.exempt(routes.api.api_add_account_user)
-    csrf.exempt(routes.api.api_remove_account_user)
-
     # Load config from env variables if using docker
     if os.path.exists(os.path.join(app.root_path, 'docker_config.py')):
         app.config.from_object('powerdnsadmin.docker_config')
@@ -66,17 +43,31 @@ def create_app(config=None):
     if 'FLASK_CONF' in os.environ:
         app.config.from_envvar('FLASK_CONF')
 
-    # Load app sepecified configuration
+    # Load app specified configuration
     if config is not None:
         if isinstance(config, dict):
             app.config.update(config)
         elif config.endswith('.py'):
             app.config.from_pyfile(config)
 
+    # Load any settings defined with environment variables
+    AppSettings.load_environment(app)
+
     # HSTS
     if app.config.get('HSTS_ENABLED'):
         from flask_sslify import SSLify
         _sslify = SSLify(app)  # lgtm [py/unused-local-variable]
+
+    # Load Flask-Session
+    app.config['SESSION_TYPE'] = app.config.get('SESSION_TYPE')
+    if 'SESSION_TYPE' in os.environ:
+        app.config['SESSION_TYPE'] = os.environ.get('SESSION_TYPE')
+
+    sess = Session(app)
+
+    # create sessions table if using sqlalchemy backend
+    if os.environ.get('SESSION_TYPE') == 'sqlalchemy':
+        sess.app.session_interface.db.create_all()
 
     # SMTP
     app.mail = Mail(app)
@@ -91,12 +82,12 @@ def create_app(config=None):
     app.jinja_env.filters['display_record_name'] = utils.display_record_name
     app.jinja_env.filters['display_master_name'] = utils.display_master_name
     app.jinja_env.filters['display_second_to_time'] = utils.display_time
-    app.jinja_env.filters[
-        'email_to_gravatar_url'] = utils.email_to_gravatar_url
-    app.jinja_env.filters[
-        'display_setting_state'] = utils.display_setting_state
+    app.jinja_env.filters['display_setting_state'] = utils.display_setting_state
+    app.jinja_env.filters['pretty_domain_name'] = utils.pretty_domain_name
+    app.jinja_env.filters['format_datetime_local'] = utils.format_datetime
+    app.jinja_env.filters['format_zone_type'] = utils.format_zone_type
 
-    # Register context proccessors
+    # Register context processors
     from .models.setting import Setting
 
     @app.context_processor
@@ -108,10 +99,5 @@ def create_app(config=None):
     def inject_setting():
         setting = Setting()
         return dict(SETTING=setting)
-
-    @app.context_processor
-    def inject_mode():
-        setting = app.config.get('OFFLINE_MODE', False)
-        return dict(OFFLINE_MODE=setting)
 
     return app
